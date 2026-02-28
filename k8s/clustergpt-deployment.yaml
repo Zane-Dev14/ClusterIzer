@@ -1,0 +1,115 @@
+# ClusterGPT Kubernetes Deployment
+# Runs as a CronJob that audits the cluster every 6 hours.
+# Requires: read-only ClusterRole + ServiceAccount.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clustergpt
+  namespace: default
+  labels:
+    app: clustergpt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clustergpt-reader
+  labels:
+    app: clustergpt
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - nodes
+      - services
+      - events
+      - namespaces
+      - persistentvolumeclaims
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clustergpt-reader-binding
+  labels:
+    app: clustergpt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clustergpt-reader
+subjects:
+  - kind: ServiceAccount
+    name: clustergpt
+    namespace: default
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: clustergpt
+  namespace: default
+  labels:
+    app: clustergpt
+spec:
+  schedule: "0 */6 * * *"          # Every 6 hours
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app: clustergpt
+        spec:
+          serviceAccountName: clustergpt
+          restartPolicy: OnFailure
+          containers:
+            - name: clustergpt
+              image: clustergpt:latest
+              imagePullPolicy: IfNotPresent
+              args:
+                - analyze
+                - --output
+                - /reports/report.md
+                - --debug
+              env:
+                - name: OPENAI_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: clustergpt-secrets
+                      key: openai-api-key
+                      optional: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: reports
+                  mountPath: /reports
+          volumes:
+            - name: reports
+              emptyDir: {}

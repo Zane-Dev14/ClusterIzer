@@ -1,0 +1,28 @@
+# CrashLoopBackOff Demo App
+#
+# This deployment runs a container that exits immediately with code 1,
+# triggering CrashLoopBackOff.  It also has no probes, no resource
+# requests/limits, and only 1 replica — triggering multiple rules.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crashloop-app
+  namespace: default
+  labels:
+    app: crashloop-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crashloop-demo
+  template:
+    metadata:
+      labels:
+        app: crashloop-demo
+    spec:
+      containers:
+        - name: crasher
+          image: busybox
+          command: ["sh", "-c", "echo 'Starting...' && exit 1"]
+          # No resources, no probes — intentionally bad

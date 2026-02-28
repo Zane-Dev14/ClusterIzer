@@ -1,0 +1,40 @@
+# OOMKilled Demo App
+#
+# This deployment sets a very low memory limit (10Mi) and runs a command
+# that allocates memory, triggering an OOMKill.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oom-app
+  namespace: default
+  labels:
+    app: oom-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oom-demo
+  template:
+    metadata:
+      labels:
+        app: oom-demo
+    spec:
+      containers:
+        - name: oom-eater
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              echo "Allocating memory..."
+              # Allocate ~50MB which exceeds the 10Mi limit
+              dd if=/dev/zero of=/dev/null bs=1M count=50
+              sleep 3600
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "10Mi"
+            limits:
+              cpu: "100m"
+              memory: "10Mi"
