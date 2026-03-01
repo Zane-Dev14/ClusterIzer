@@ -8,6 +8,7 @@ dependencies = [
     "kubernetes>=35.0.0",
     "langchain>=1.2.10",
     "langchain-community>=0.4.1",
+    "langchain-ollama>=0.3.3",
     "langgraph>=1.0.10",
     "pydantic>=2.12.5",
     "rich>=14.3.3",

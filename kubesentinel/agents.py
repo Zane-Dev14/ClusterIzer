@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any
 
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -263,6 +263,8 @@ def _extract_json_findings(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Get last message content
     last_msg = messages[-1]
     content = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+    if not isinstance(content, str):
+        content = str(content)
     
     # Try to find JSON array in content
     try:
@@ -334,7 +336,12 @@ Produce your strategic summary following the format in your instructions.
         ]
         
         response = LLM.invoke(messages)
-        summary = response.content if hasattr(response, 'content') else str(response)
+        # Ensure response is string (handle list or other types)
+        if hasattr(response, 'content'):
+            content = response.content
+            summary = str(content) if not isinstance(content, str) else content
+        else:
+            summary = str(response)
         
         # Cap at ~1000 tokens (rough estimate: 4 chars per token)
         if len(summary) > 4000:

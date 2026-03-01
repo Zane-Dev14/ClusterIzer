@@ -44,10 +44,18 @@ def build_report(state: InfraState) -> str:
     sections.append(_build_architecture_section(state))
     
     # 2. Cost Optimization Report
-    sections.append(_build_cost_section(state))
+    sections.append(_build_findings_section(
+        "💰 Cost Optimization Report", 
+        state.get("cost_findings", []),
+        "cost optimization issues"
+    ))
     
     # 3. Security Audit
-    sections.append(_build_security_section(state))
+    sections.append(_build_findings_section(
+        "🔐 Security Audit",
+        state.get("security_findings", []),
+        "security issues"
+    ))
     
     # 4. Reliability Risk Score
     sections.append(_build_risk_section(state))
@@ -120,54 +128,14 @@ def _build_architecture_section(state: InfraState) -> str:
     return "\n".join(lines)
 
 
-def _build_cost_section(state: InfraState) -> str:
-    """Build cost optimization section."""
-    findings = state.get("cost_findings", [])
-    
-    lines = [
-        "## 💰 Cost Optimization Report\n",
-    ]
+def _build_findings_section(title: str, findings: List[Dict[str, Any]], issue_type: str) -> str:
+    """Build findings section (cost/security/failure)."""
+    lines = [f"## {title}\n"]
     
     if not findings:
-        lines.append("✅ **No cost optimization issues detected.**\n")
+        lines.append(f"✅ **No {issue_type} detected.**\n")
     else:
         lines.append(f"**Total Findings:** {len(findings)}\n")
-        
-        # Group by severity
-        by_severity = _group_by_severity(findings)
-        
-        for severity in ["critical", "high", "medium", "low"]:
-            items = by_severity.get(severity, [])
-            if items:
-                icon = _severity_icon(severity)
-                lines.append(f"### {icon} {severity.upper()} Priority\n")
-                
-                for finding in items[:5]:
-                    lines.append(f"**{finding['resource']}**")
-                    lines.append(f"- **Analysis:** {finding['analysis']}")
-                    lines.append(f"- **Recommendation:** {finding['recommendation']}\n")
-                
-                if len(items) > 5:
-                    lines.append(f"_(... and {len(items) - 5} more {severity} findings)_\n")
-    
-    lines.append("---\n")
-    return "\n".join(lines)
-
-
-def _build_security_section(state: InfraState) -> str:
-    """Build security audit section."""
-    findings = state.get("security_findings", [])
-    
-    lines = [
-        "## 🔐 Security Audit\n",
-    ]
-    
-    if not findings:
-        lines.append("✅ **No security issues detected.**\n")
-    else:
-        lines.append(f"**Total Findings:** {len(findings)}\n")
-        
-        # Group by severity
         by_severity = _group_by_severity(findings)
         
         for severity in ["critical", "high", "medium", "low"]:

@@ -5,6 +5,7 @@ Typer-based CLI for running Kubernetes intelligence analysis.
 Single command: scan
 """
 
+import json
 import logging
 import sys
 from typing import Optional
@@ -16,6 +17,7 @@ from rich.table import Table
 
 from .runtime import run_engine
 from .reporting import build_report
+from .models import InfraState
 
 # Configure logging
 logging.basicConfig(
@@ -49,6 +51,16 @@ def scan(
         "--verbose",
         "-v",
         help="Enable verbose logging (DEBUG level)"
+    ),
+    ci_mode: bool = typer.Option(
+        False,
+        "--ci",
+        help="CI mode: exit 1 if grade >= D, minimal output"
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output results as JSON (implies --ci)"
     )
 ):
     """
@@ -81,6 +93,11 @@ def scan(
         console.print("📝 [bold]Generating report...[/bold]")
         build_report(state)
         
+        # Handle CI/JSON mode
+        if json_output or ci_mode:
+            exit_code = _handle_ci_mode(state, json_output)
+            sys.exit(exit_code)
+        
         # Display summary
         _display_summary(state)
         
@@ -104,7 +121,7 @@ def scan(
         sys.exit(1)
 
 
-def _display_summary(state: dict) -> None:
+def _display_summary(state: InfraState) -> None:
     """Display rich summary table."""
     risk = state.get("risk_score", {})
     signals = state.get("signals", [])
@@ -138,6 +155,40 @@ def _display_summary(state: dict) -> None:
     
     console.print()
     console.print(table)
+
+
+def _handle_ci_mode(state: InfraState, json_output: bool) -> int:
+    """Handle CI mode execution.
+    
+    Returns:
+        Exit code: 0 if grade < D, 1 if grade >= D
+    """
+    risk = state.get("risk_score", {})
+    grade = risk.get("grade", "F")
+    score = risk.get("score", 100)
+    
+    # Determine exit code based on grade
+    exit_code = 0 if grade in ["A", "B", "C"] else 1
+    
+    if json_output:
+        # Output JSON format
+        result = {
+            "risk_score": risk,
+            "signals_count": len(state.get("signals", [])),
+            "failure_findings_count": len(state.get("failure_findings", [])),
+            "cost_findings_count": len(state.get("cost_findings", [])),
+            "security_findings_count": len(state.get("security_findings", [])),
+            "exit_code": exit_code,
+            "passed": exit_code == 0
+        }
+        console.print(json.dumps(result, indent=2))
+    else:
+        # Minimal CI output
+        status = "✅ PASSED" if exit_code == 0 else "❌ FAILED"
+        console.print(f"\n{status} - Risk Grade: {grade} (Score: {score}/100)")
+        console.print("Report: report.md\n")
+    
+    return exit_code
 
 
 @app.command()
