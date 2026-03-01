@@ -1,0 +1,28 @@
+[project]
+name = "kubesentinel"
+version = "0.1.0"
+description = "Hierarchical graph-based multi-agent Kubernetes intelligence engine using LangGraph + LangChain + Ollama"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "kubernetes>=35.0.0",
+    "langchain>=1.2.10",
+    "langchain-community>=0.4.1",
+    "langgraph>=1.0.10",
+    "pydantic>=2.12.5",
+    "rich>=14.3.3",
+    "typer>=0.24.1",
+]
+
+[project.scripts]
+kubesentinel = "kubesentinel.main:app"
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "ruff>=0.15.4",
+]

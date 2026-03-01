@@ -1,248 +1,274 @@
-# ClusterGPT — Autonomous Kubernetes Auditor & Co-Pilot
+# KubeSentinel
 
-An AI-powered CLI that connects to any Kubernetes cluster, audits its architecture, reliability, cost, and security posture, then emits a single actionable report with prioritized fixes.
+**Kubernetes Intelligence Engine**
 
-## Quick Start
+A hierarchical, persistent, graph-based multi-agent runtime for Kubernetes infrastructure analysis using LangChain, LangGraph, and Ollama.
 
-```bash
-# 1. Clone & install
-git clone <repo-url> && cd week-4
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+---
 
-# 2. Analyze your cluster
-python -m app.main analyze --kubeconfig ~/.kube/config --output report.md
+## Overview
 
-# 3. Read the report
-cat report.md
-```
+KubeSentinel is a **deterministic-first AI system** that:
+
+1. Connects to any Kubernetes cluster (via kubeconfig or in-cluster)
+2. Extracts bounded static state (nodes, deployments, pods, services)
+3. Builds a dependency graph and generates deterministic signals
+4. Computes risk scores using severity-weighted signal aggregation
+5. Delegates analysis to specialized ReAct agents (failure, cost, security)
+6. Produces comprehensive markdown reports with strategic AI insights
+
+This is **not a chatbot**. It's a graph-executed reasoning system.
+
+---
 
 ## Architecture
 
 ```
-Connector → Graph Builder → Rules Engine (12 checks)
-                          → Cost Analyst
-                          → Investigator (diagnosis)
-                                ↓
-                          Explainer (LLM / template)
-                                ↓
-                          Report Generator → report.md / report.json
-                                ↓
-                          Remediation (--apply / --dry-run)
-                                ↓
-                          Verifier (post-fix health check)
+┌──────────────────────┐
+│ CLI (scan command)   │
+└─────────────┬────────┘
+              ↓
+┌─────────────────────────────┐
+│ Deterministic Layer         │
+│                             │
+│ 1. Cluster Snapshot Node    │
+│ 2. Graph Builder Node       │
+│ 3. Signal Engine Node       │
+│ 4. Risk Model Node          │
+└─────────────┬───────────────┘
+              ↓
+┌─────────────────────────────┐
+│ DeepAgent Graph             │
+│                             │
+│ Planner Node                │
+│   ├─ FailureAgent Node      │
+│   ├─ CostAgent Node         │
+│   ├─ SecurityAgent Node     │
+│   └─ StrategicSynthesizer   │
+└─────────────┬───────────────┘
+              ↓
+┌─────────────────────────────┐
+│ Report Builder              │
+└─────────────────────────────┘
 ```
 
-**Pipeline**: All agents run synchronously in a single pass:
-`Connector → Graph → Rules + Cost + Investigator → Explainer → Report → Remediation → Verifier`
+---
 
-### Agent Modules
+## Prerequisites
 
-| Agent | File | Purpose |
-|-------|------|---------|
-| Connector | `app/tools/k8s_connector.py` | Snapshots cluster state via K8s API |
-| Graph Builder | `app/agents/graph_builder.py` | NetworkX dependency graph |
-| Rules Engine | `app/rules.py` | 12 deterministic audit checks |
-| Cost Analyst | `app/tools/cost_model.py` | Per-deployment monthly cost estimates |
-| Investigator | `app/agents/investigator.py` | CrashLoop / OOM / ImagePull diagnosis |
-| Explainer | `app/agents/explainer.py` | LLM summary with template fallback |
-| Remediation | `app/agents/remediation.py` | kubectl commands & YAML patches |
-| Verifier | `app/agents/verifier.py` | Post-remediation health checks |
-| Report | `app/reporting/report.py` | Markdown / JSON / PDF output |
+- **Python 3.11+**
+- **uv** package manager ([install uv](https://github.com/astral-sh/uv))
+- **Ollama** with `llama3.1:8b-instruct-q8_0` model
+- Access to a Kubernetes cluster (kubeconfig or in-cluster)
 
-## CLI Usage
+---
+
+## Installation
 
 ```bash
-# Full analysis with debug output
-python -m app.main analyze \
-    --kubeconfig ~/.kube/config \
-    --output report.md \
-    --namespace default \
-    --debug
+# Install dependencies
+make install
 
-# Dry-run remediation (show patches without applying)
-python -m app.main analyze --kubeconfig ~/.kube/config --dry-run
-
-# Apply remediations (safety-gated with confirmation prompt)
-python -m app.main analyze --kubeconfig ~/.kube/config --apply
-
-# Skip confirmation
-python -m app.main analyze --kubeconfig ~/.kube/config --apply --yes
-
-# Custom pricing
-python -m app.main analyze \
-    --kubeconfig ~/.kube/config \
-    --price-cpu 0.05 \
-    --price-ram 0.006
-
-# Snapshot only (no analysis)
-python -m app.main snapshot --kubeconfig ~/.kube/config
-
-# Compare two snapshots
-python -m app.main diff snapshots/before.json snapshots/after.json
+# Or using uv directly
+uv sync
 ```
 
-### Commands
+---
 
-| Command | Description |
-|---------|-------------|
-| `analyze` | Full pipeline: snapshot → audit → report |
-| `snapshot` | Save cluster state to `snapshots/latest.json` |
-| `diff` | Compare two snapshot files |
+## Usage
 
-### Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--kubeconfig` | `~/.kube/config` | Path to kubeconfig |
-| `--output` | `report.md` | Report output path |
-| `--namespace` | all | Filter to specific namespace |
-| `--apply` | off | Apply remediations |
-| `--dry-run` | off | Show patches without applying |
-| `--yes` | off | Skip confirmation prompts |
-| `--debug` | off | Write intermediate JSON to `snapshots/` |
-| `--price-cpu` | 0.03 | CPU cost per core-hour (USD) |
-| `--price-ram` | 0.004 | RAM cost per GB-hour (USD) |
-
-## Audit Rules (12)
-
-| ID | Category | Severity | What it checks |
-|----|----------|----------|----------------|
-| `missing_requests` | Reliability | High | Containers without CPU/memory requests |
-| `missing_limits` | Reliability | High | Containers without CPU/memory limits |
-| `single_replica` | Reliability | High | Deployments with replicas=1 |
-| `missing_readiness_probe` | Reliability | Medium | No readinessProbe |
-| `missing_liveness_probe` | Reliability | Medium | No livenessProbe |
-| `image_latest` | Security | Medium | `:latest` or untagged images |
-| `wildcard_rbac` | Security | Critical | ClusterRoles with `*` verbs |
-| `privileged_container` | Security | Critical | `privileged: true` containers |
-| `no_network_policy` | Security | Medium | Namespaces without NetworkPolicies |
-| `overprovision` | Cost | Medium | CPU/memory requests > 2× actual usage |
-| `hpa_missing_high_cpu` | Architecture | Medium | High-CPU pods without HPA |
-| `pvc_not_bound` | Reliability | High | PVCs stuck in non-Bound state |
-
-## Report Output
-
-The report includes:
-- **Risk Score** (0–100): weighted sum of findings by severity
-- **Findings Table**: severity, resource, description, remediation
-- **Cost Analysis**: per-deployment monthly cost, total, waste %
-- **Remediation Commands**: copy-paste `kubectl` commands
-- **Explainer Output** (when available): executive summary, SRE actions, PR text
-
-## Demo
-
-See [demos/demo_script.md](demos/demo_script.md) for a walkthrough using purpose-built sample apps:
+### Basic Scan
 
 ```bash
-# Deploy intentionally broken apps
-kubectl apply -f demos/sample_app/
+# Run full cluster analysis
+make run
 
-# Run ClusterGPT
-python -m app.main analyze --output report.md --debug
-
-# Cleanup
-kubectl delete -f demos/sample_app/
+# Or using uv directly
+uv run kubesentinel scan
 ```
 
-Demo manifests trigger: CrashLoopBackOff, OOMKilled, privileged containers, missing probes, no resource limits, `:latest` images, and single-replica deployments.
-
-## Configuration
-
-| Environment Variable | Purpose |
-|---------------------|---------|
-| `OPENAI_API_KEY` | Enable LLM-powered explainer (optional) |
-| `KUBECONFIG` | Default kubeconfig path |
-
-Pricing constants are in `app/config.py`. Override at CLI with `--price-cpu` / `--price-ram`.
-
-## Testing
+### Custom Query
 
 ```bash
-# Run all tests (offline + live if cluster available)
-bash scripts/smoke_test.sh
-
-# Offline only (no cluster needed)
-python scripts/explainer_test.py
-
-# With a live cluster
-bash scripts/snapshot_test.sh
-bash scripts/e2e_demo.sh
-bash scripts/verify_remediation.sh
+# Focus on specific analysis
+uv run kubesentinel scan --query "security audit"
+uv run kubesentinel scan --query "cost optimization"
+uv run kubesentinel scan --query "reliability analysis"
 ```
 
-## Docker
+### Verbose Mode
 
 ```bash
-# Build
-docker build -t clustergpt:latest .
-
-# Run (mount kubeconfig)
-docker run --rm \
-    -v ~/.kube/config:/home/clustergpt/.kube/config:ro \
-    clustergpt:latest analyze --output /dev/stdout
+uv run kubesentinel scan --verbose
 ```
 
-## Kubernetes Deployment
+---
 
-Deploy as a CronJob that audits every 6 hours:
+## Output
+
+KubeSentinel generates `report.md` with the following sections:
+
+1. **Architecture Report** - Cluster topology, orphan services, single-replica deployments
+2. **Cost Optimization Report** - Over-provisioning, missing limits, waste
+3. **Security Audit** - Privileged containers, :latest tags, vulnerabilities
+4. **Reliability Risk Score** - Weighted risk assessment (0-100, grades A-F)
+5. **Strategic AI Analysis** - Executive summary with prioritized recommendations
+
+---
+
+## Development
+
+### Run Tests
 
 ```bash
-kubectl apply -f k8s/clustergpt-deployment.yaml
+make test
+
+# Or with pytest directly
+uv run pytest kubesentinel/tests/ -v
 ```
 
-This creates a ServiceAccount with read-only ClusterRole — no write permissions unless you add the Remediation Agent's RBAC.
+### Lint
+
+```bash
+make lint
+```
+
+### Type Check
+
+```bash
+make typecheck
+```
+
+### Clean
+
+```bash
+make clean
+```
+
+---
 
 ## Project Structure
 
 ```
-app/
+kubesentinel/
 ├── __init__.py
-├── main.py              # CLI entrypoint (typer)
-├── models.py            # Pydantic data models
-├── config.py            # Constants & pricing
-├── rules.py             # 12 audit rules
-├── tools/
-│   ├── utils.py         # Shared helpers
-│   ├── k8s_connector.py # Cluster snapshot
-│   └── cost_model.py    # Cost estimation
-├── agents/
-│   ├── graph_builder.py # Dependency graph
-│   ├── investigator.py  # Failure diagnosis
-│   ├── explainer.py     # LLM / template explainer
-│   ├── remediation.py   # Patch generation
-│   └── verifier.py      # Post-fix validation
-└── reporting/
-    └── report.py        # Report generator
-
-demos/
-├── demo_script.md
-└── sample_app/          # Intentionally broken K8s manifests
-
-scripts/
-├── smoke_test.sh        # Meta test runner
-├── snapshot_test.sh     # Connector test
-├── e2e_demo.sh          # Full pipeline test
-├── explainer_test.py    # Offline explainer test
-└── verify_remediation.sh
-
-k8s/
-└── clustergpt-deployment.yaml  # CronJob + RBAC
-
-docs/
-└── PRD.md               # Product Requirements Document
+├── models.py           # State contract (TypedDict)
+├── cluster.py          # Cluster snapshot node
+├── graph_builder.py    # Dependency graph node
+├── signals.py          # Signal engine node
+├── risk.py             # Risk model node
+├── tools.py            # Deterministic tools for agents
+├── agents.py           # Planner, agent nodes, synthesizer
+├── runtime.py          # LangGraph orchestration
+├── reporting.py        # Markdown report builder
+├── main.py             # Typer CLI
+├── prompts/            # Agent system prompts
+│   ├── planner.txt
+│   ├── failure_agent.txt
+│   ├── cost_agent.txt
+│   ├── security_agent.txt
+│   └── synthesizer.txt
+└── tests/              # Unit tests
+    ├── test_signals.py
+    ├── test_risk.py
+    └── test_graph.py
 ```
 
-## Tech Stack
+---
 
-- **Python 3.11** with type hints throughout
-- **typer** — CLI framework
-- **kubernetes** (>=28.1) — official K8s Python client
-- **pydantic** v2 — data validation & models
-- **networkx** — dependency graph
-- **openai** — optional LLM integration
-- **rich** — terminal formatting (graceful fallback)
+## Design Principles
+
+### 1. Deterministic Before Generative
+
+All cluster inspection is deterministic. The LLM:
+
+- NEVER connects to the cluster
+- NEVER receives full raw cluster JSON
+- NEVER mutates the cluster
+
+LLMs only see:
+
+- Slim snapshots
+- Signal summaries
+- Graph summaries
+- Structured tool outputs
+
+### 2. Explicit State
+
+All execution state is stored in a typed schema (`InfraState`).
+
+- No hidden memory
+- State flows node-to-node
+- Full checkpointing support
+
+### 3. Graph-Based Execution
+
+Uses LangGraph's `StateGraph` for explicit delegation:
+
+```
+scan_cluster → build_graph → generate_signals → compute_risk
+    → planner → [agents] → synthesizer → END
+```
+
+Delegation = graph traversal.
+
+---
+
+## Hard Limits
+
+To prevent unbounded growth:
+
+- Max 1000 pods
+- Max 200 deployments
+- Max 200 services
+- Max 200 signals
+- Max 50 findings per agent
+
+---
+
+## MVP Completion Criteria
+
+✅ End-to-end execution works  
+✅ DeepAgent graph delegates properly  
+✅ Risk score computed  
+✅ Reports generated  
+✅ Memory checkpointing works  
+✅ < 20 files  
+✅ ~1000 LOC  
+
+---
+
+## What's NOT Included (By Design)
+
+This is an MVP. The following are **explicitly out of scope**:
+
+❌ Auto-remediation  
+❌ UI/Dashboard  
+❌ RAG/Vector databases  
+❌ Telemetry/Observability  
+❌ Fine-tuning  
+❌ Additional agent types  
+❌ Docker/Kubernetes deployment (dev-only for MVP)  
+
+---
 
 ## License
 
-Internal use — IBM course deliverable.
+MIT License - See LICENSE file for details.
+
+---
+
+## Contributing
+
+This is an MVP implementation following strict requirements.  
+Feature additions beyond scope will not be accepted.
+
+For bugs or improvements within scope, please open an issue.
+
+---
+
+**Built with:**
+- [LangChain](https://github.com/langchain-ai/langchain)
+- [LangGraph](https://github.com/langchain-ai/langgraph)
+- [Ollama](https://ollama.ai/)
+- [Kubernetes Python Client](https://github.com/kubernetes-client/python)
