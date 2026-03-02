@@ -5,7 +5,7 @@ This defines the single execution contract that flows through all nodes.
 All lists are hard-capped to prevent unbounded growth.
 """
 
-from typing import TypedDict, List, Dict, Any
+from typing import TypedDict, List, Dict, Any, Optional
 
 # Hard caps to prevent unbounded state growth
 MAX_PODS = 1000
@@ -16,19 +16,22 @@ MAX_SIGNALS = 200
 MAX_FINDINGS = 50
 
 
-class InfraState(TypedDict):
+class InfraState(TypedDict, total=False):
     """
     Execution state for the KubeSentinel graph.
     
     This TypedDict defines the complete state schema that flows through
     all nodes in the LangGraph execution. No nested arbitrary growth is
     allowed - all lists must be capped.
+    
+    Fields marked with total=False are optional and may not be present
+    in all execution paths.
     """
     
-    # User input
+    # User input (required)
     user_query: str
     
-    # Deterministic layer outputs
+    # Deterministic layer outputs (required)
     cluster_snapshot: Dict[str, Any]  # {nodes, deployments, pods, services}
     graph_summary: Dict[str, Any]     # {adjacency dicts, derived metrics}
     signals: List[Dict[str, Any]]     # [{category, severity, resource, message}]
@@ -45,3 +48,6 @@ class InfraState(TypedDict):
     # Synthesis outputs
     strategic_summary: str            # Executive summary from synthesizer
     final_report: str                 # Full markdown report
+    
+    # Runtime configuration
+    target_namespace: Optional[str]   # Kubernetes namespace to scope scan (None = all namespaces)

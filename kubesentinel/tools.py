@@ -35,7 +35,7 @@ def make_tools(state: InfraState) -> List:
         Get high-level cluster summary (counts, node names, namespaces).
         Does NOT return full raw cluster snapshot.
         """
-        snapshot = state["cluster_snapshot"]
+        snapshot = state.get("cluster_snapshot", {})
         
         nodes = snapshot.get("nodes", [])
         deployments = snapshot.get("deployments", [])
@@ -68,7 +68,7 @@ def make_tools(state: InfraState) -> List:
         Get dependency graph summary with derived metrics.
         Includes orphan services, single-replica deployments, node fanout.
         """
-        graph = state["graph_summary"]
+        graph = state.get("graph_summary", {})
         
         # Return relevant parts (not full adjacency)
         summary = {
@@ -92,7 +92,7 @@ def make_tools(state: InfraState) -> List:
         Returns:
             JSON array of signals
         """
-        signals = state["signals"]
+        signals = state.get("signals", [])
         
         if category:
             signals = [s for s in signals if s.get("category") == category]
@@ -105,7 +105,7 @@ def make_tools(state: InfraState) -> List:
         """
         Get computed risk score and grade.
         """
-        risk = state["risk_score"]
+        risk = state.get("risk_score", {})
         return json.dumps(risk, indent=2)
     
     return [

@@ -42,6 +42,7 @@ def test_crashloop_signal_generated():
     }
     
     result = generate_signals(state)
+    assert "signals" in result
     signals = result["signals"]
     
     # Should have at least one signal
@@ -87,6 +88,7 @@ def test_single_replica_signal_generated():
     }
     
     result = generate_signals(state)
+    assert "signals" in result
     signals = result["signals"]
     
     # Should have single replica signal
@@ -136,6 +138,7 @@ def test_privileged_container_signal():
     }
     
     result = generate_signals(state)
+    assert "signals" in result
     signals = result["signals"]
     
     # Should have privileged signal
@@ -192,6 +195,7 @@ def test_signal_deduplication():
     }
     
     result = generate_signals(state)
+    assert "signals" in result
     signals = result["signals"]
     
     # Each container should generate its own :latest signal (different container names)
@@ -244,6 +248,7 @@ def test_signal_cap_enforced():
     }
     
     result = generate_signals(state)
+    assert "signals" in result
     signals = result["signals"]
     
     # Should be capped at MAX_SIGNALS

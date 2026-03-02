@@ -37,7 +37,7 @@ def build_report(state: InfraState) -> str:
     
     # Header
     sections.append("# KubeSentinel Infrastructure Intelligence Report\n")
-    sections.append(f"**Analysis Query:** {state['user_query']}\n")
+    sections.append(f"**Analysis Query:** {state.get('user_query')}\n")
     sections.append("---\n")
     
     # 1. Architecture Report
@@ -78,8 +78,8 @@ def build_report(state: InfraState) -> str:
 
 def _build_architecture_section(state: InfraState) -> str:
     """Build architecture overview section."""
-    snapshot = state["cluster_snapshot"]
-    graph = state["graph_summary"]
+    snapshot = state.get("cluster_snapshot", {})
+    graph = state.get("graph_summary", {})
     
     nodes = snapshot.get("nodes", [])
     deployments = snapshot.get("deployments", [])

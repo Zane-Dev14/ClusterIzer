@@ -21,10 +21,11 @@ def scan_cluster(state: InfraState) -> InfraState:
     
     Attempts to load kubeconfig, falls back to in-cluster config.
     Fetches nodes, deployments, pods, and services with strict size caps.
+    Optionally filters by namespace if target_namespace is set in state.
     Transforms to slim structure - no raw JSON, no logs, no metrics.
     
     Args:
-        state: Current InfraState (user_query already set)
+        state: Current InfraState (user_query already set, optional target_namespace)
         
     Returns:
         Updated state with cluster_snapshot populated
@@ -33,6 +34,9 @@ def scan_cluster(state: InfraState) -> InfraState:
         RuntimeError: If unable to connect to any cluster
     """
     logger.info("Starting cluster scan...")
+    
+    # Get target namespace if specified
+    target_namespace = state.get("target_namespace", None)
     
     # Try to load cluster configuration
     try:
@@ -56,9 +60,16 @@ def scan_cluster(state: InfraState) -> InfraState:
     # Fetch resources
     try:
         nodes_raw = core_v1.list_node(limit=MAX_NODES)
-        pods_raw = core_v1.list_pod_for_all_namespaces(limit=MAX_PODS)
-        deployments_raw = apps_v1.list_deployment_for_all_namespaces(limit=MAX_DEPLOYMENTS)
-        services_raw = core_v1.list_service_for_all_namespaces(limit=MAX_SERVICES)
+        
+        # Filter by namespace if specified
+        if target_namespace:
+            pods_raw = core_v1.list_namespaced_pod(namespace=target_namespace, limit=MAX_PODS)
+            deployments_raw = apps_v1.list_namespaced_deployment(namespace=target_namespace, limit=MAX_DEPLOYMENTS)
+            services_raw = core_v1.list_namespaced_service(namespace=target_namespace, limit=MAX_SERVICES)
+        else:
+            pods_raw = core_v1.list_pod_for_all_namespaces(limit=MAX_PODS)
+            deployments_raw = apps_v1.list_deployment_for_all_namespaces(limit=MAX_DEPLOYMENTS)
+            services_raw = core_v1.list_service_for_all_namespaces(limit=MAX_SERVICES)
     except ApiException as e:
         raise RuntimeError(f"Failed to fetch cluster resources: {e}")
     

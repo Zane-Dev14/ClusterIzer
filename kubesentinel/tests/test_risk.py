@@ -25,6 +25,7 @@ def test_empty_signals_score_zero():
     }
     
     result = compute_risk(state)
+    assert "risk_score" in result
     risk = result["risk_score"]
     
     assert risk["score"] == 0
@@ -56,6 +57,7 @@ def test_single_critical_signal():
     }
     
     result = compute_risk(state)
+    assert "risk_score" in result
     risk = result["risk_score"]
     
     assert risk["score"] == 15
@@ -90,6 +92,7 @@ def test_score_capped_at_100():
     }
     
     result = compute_risk(state)
+    assert "risk_score" in result
     risk = result["risk_score"]
     
     # 20 critical signals = 20 * 15 = 300, but capped at 100
@@ -121,6 +124,7 @@ def test_grade_boundary_A_B():
     }
     
     result_a = compute_risk(state_a)
+    assert "risk_score" in result_a
     assert result_a["risk_score"]["score"] == 29
     assert result_a["risk_score"]["grade"] == "A"
     
@@ -143,6 +147,7 @@ def test_grade_boundary_A_B():
     }
     
     result_b = compute_risk(state_b)
+    assert "risk_score" in result_b
     assert result_b["risk_score"]["score"] == 30
     assert result_b["risk_score"]["grade"] == "B"
 
@@ -174,6 +179,7 @@ def test_grade_boundary_C_D():
     }
     
     result_c = compute_risk(state_c)
+    assert "risk_score" in result_c
     assert result_c["risk_score"]["score"] == 69
     assert result_c["risk_score"]["grade"] == "C"
     
@@ -195,6 +201,7 @@ def test_grade_boundary_C_D():
     }
     
     result_d = compute_risk(state_d)
+    assert "risk_score" in result_d
     assert result_d["risk_score"]["score"] == 70
     assert result_d["risk_score"]["grade"] == "D"
 
@@ -232,6 +239,7 @@ def test_grade_D_F_boundary():
     }
     
     result_d = compute_risk(state_d)
+    assert "risk_score" in result_d
     assert result_d["risk_score"]["score"] == 89
     assert result_d["risk_score"]["grade"] == "D"
     
@@ -255,5 +263,6 @@ def test_grade_D_F_boundary():
     }
     
     result_f = compute_risk(state_f)
+    assert "risk_score" in result_f
     assert result_f["risk_score"]["score"] == 90
     assert result_f["risk_score"]["grade"] == "F"

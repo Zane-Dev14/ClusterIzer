@@ -62,6 +62,7 @@ def test_deployment_to_pods_mapping():
     }
     
     result = build_graph(state)
+    assert "graph_summary" in result
     graph = result["graph_summary"]
     
     dep_to_pods = graph["deployment_to_pods"]
@@ -113,6 +114,7 @@ def test_orphan_service_detection():
     }
     
     result = build_graph(state)
+    assert "graph_summary" in result
     graph = result["graph_summary"]
     
     # Both services are orphans because there are no pods
@@ -162,6 +164,7 @@ def test_single_replica_detection():
     }
     
     result = build_graph(state)
+    assert "graph_summary" in result
     graph = result["graph_summary"]
     
     single_replica = graph["single_replica_deployments"]
@@ -245,6 +248,7 @@ def test_node_fanout_count():
     }
     
     result = build_graph(state)
+    assert "graph_summary" in result
     graph = result["graph_summary"]
     
     fanout = graph["node_fanout_count"]
@@ -293,6 +297,7 @@ def test_pod_to_node_mapping():
     }
     
     result = build_graph(state)
+    assert "graph_summary" in result
     graph = result["graph_summary"]
     
     pod_to_node = graph["pod_to_node"]

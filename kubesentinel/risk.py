@@ -50,7 +50,7 @@ def compute_risk(state: InfraState) -> InfraState:
     """
     logger.info("Computing risk score...")
     
-    signals = state["signals"]
+    signals = state.get("signals", [])
     
     # Sum severity weights
     total_score = 0

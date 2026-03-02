@@ -1,7 +1,7 @@
 """
 Agent nodes - planner, specialized agents, and synthesizer.
 
-All agents in this file. Uses create_react_agent from langgraph.prebuilt
+All agents in this file. Uses create_agent from langchain.agents
 for the sub-agents. Planner is deterministic.
 """
 
@@ -12,7 +12,7 @@ from typing import List, Dict, Any
 
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 from .models import InfraState, MAX_FINDINGS
 from .tools import make_tools
@@ -50,7 +50,7 @@ def planner_node(state: InfraState) -> InfraState:
     """
     logger.info("Planning agent execution...")
     
-    query = state["user_query"].lower()
+    query = state.get("user_query", "").lower()
     
     # Deterministic keyword matching
     agents = []
@@ -84,7 +84,7 @@ def failure_agent_node(state: InfraState) -> InfraState:
     """
     Reliability and failure analysis agent.
     
-    Uses create_react_agent to analyze reliability signals with tools.
+    Uses create_agent to analyze reliability signals with tools.
     Skips execution if not selected by planner.
     
     Args:
@@ -120,7 +120,7 @@ def cost_agent_node(state: InfraState) -> InfraState:
     """
     Cost optimization analysis agent.
     
-    Uses create_react_agent to analyze cost signals with tools.
+    Uses create_agent to analyze cost signals with tools.
     Skips execution if not selected by planner.
     
     Args:
@@ -156,7 +156,7 @@ def security_agent_node(state: InfraState) -> InfraState:
     """
     Security audit analysis agent.
     
-    Uses create_react_agent to analyze security signals with tools.
+    Uses create_agent to analyze security signals with tools.
     Skips execution if not selected by planner.
     
     Args:
@@ -195,9 +195,9 @@ def _run_agent(
     category: str
 ) -> List[Dict[str, Any]]:
     """
-    Run a ReAct agent with tools and parse JSON findings.
+    Run an agent with tools and parse JSON findings.
     
-    Uses create_react_agent from langgraph.prebuilt.
+    Uses create_agent from langchain.agents.
     
     Args:
         state: Current InfraState
@@ -214,15 +214,15 @@ def _run_agent(
     # Create tools with state closure
     tools = make_tools(state)
     
-    # Create ReAct agent
-    agent = create_react_agent(
+    # Create agent
+    agent = create_agent(
         LLM,
         tools,
-        prompt=system_prompt
+        system_prompt=system_prompt
     )
     
     # Build human message summarizing signals
-    signals = state["signals"]
+    signals = state.get("signals", [])
     category_signals = [s for s in signals if s.get("category") == category]
     
     human_msg = f"""Analyze the {category} signals and provide findings.
@@ -250,12 +250,15 @@ Return your findings as a JSON array as specified in your instructions.
     return findings
 
 
-def _extract_json_findings(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _extract_json_findings(result: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     """
     Extract JSON findings array from agent messages.
     
     Looks for JSON in the last message content.
     """
+    if result is None:
+        return []
+    
     messages = result.get("messages", [])
     if not messages:
         return []

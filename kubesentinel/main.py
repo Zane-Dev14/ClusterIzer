@@ -52,6 +52,12 @@ def scan(
         "-v",
         help="Enable verbose logging (DEBUG level)"
     ),
+    namespace: Optional[str] = typer.Option(
+        None,
+        "--namespace",
+        "-n",
+        help="Kubernetes namespace to scan (default: all namespaces)"
+    ),
     ci_mode: bool = typer.Option(
         False,
         "--ci",
@@ -87,7 +93,7 @@ def scan(
     try:
         # Run engine
         console.print("\n🔍 [bold]Scanning cluster...[/bold]")
-        state = run_engine(query)
+        state = run_engine(query, namespace=namespace)
         
         # Build report
         console.print("📝 [bold]Generating report...[/bold]")
@@ -166,20 +172,33 @@ def _handle_ci_mode(state: InfraState, json_output: bool) -> int:
     risk = state.get("risk_score", {})
     grade = risk.get("grade", "F")
     score = risk.get("score", 100)
+    signals = state.get("signals", [])
     
     # Determine exit code based on grade
     exit_code = 0 if grade in ["A", "B", "C"] else 1
     
     if json_output:
-        # Output JSON format
+        # Clean JSON output with full findings
         result = {
-            "risk_score": risk,
-            "signals_count": len(state.get("signals", [])),
-            "failure_findings_count": len(state.get("failure_findings", [])),
-            "cost_findings_count": len(state.get("cost_findings", [])),
-            "security_findings_count": len(state.get("security_findings", [])),
-            "exit_code": exit_code,
-            "passed": exit_code == 0
+            "metadata": {
+                "version": "0.1.0",
+                "timestamp": __import__("datetime").datetime.utcnow().isoformat()
+            },
+            "risk": {
+                "grade": grade,
+                "score": score,
+                "total_signals": len(signals)
+            },
+            "findings": {
+                "reliability": state.get("failure_findings", []),
+                "cost": state.get("cost_findings", []),
+                "security": state.get("security_findings", [])
+            },
+            "summary": state.get("strategic_summary", ""),
+            "status": {
+                "exit_code": exit_code,
+                "passed": exit_code == 0
+            }
         }
         console.print(json.dumps(result, indent=2))
     else:

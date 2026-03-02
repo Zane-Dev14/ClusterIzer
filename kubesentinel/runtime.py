@@ -100,7 +100,7 @@ def get_graph():
     return _graph
 
 
-def run_engine(user_query: str) -> InfraState:
+def run_engine(user_query: str, namespace: str | None = None) -> InfraState:
     """
     Run the complete KubeSentinel analysis engine.
     
@@ -108,6 +108,7 @@ def run_engine(user_query: str) -> InfraState:
     
     Args:
         user_query: User's analysis request (e.g., "Full cluster analysis")
+        namespace: Optional Kubernetes namespace to scope scan (default: all)
         
     Returns:
         Final InfraState with all analysis complete
@@ -116,6 +117,8 @@ def run_engine(user_query: str) -> InfraState:
         RuntimeError: If cluster connection or execution fails
     """
     logger.info(f"Starting KubeSentinel engine with query: {user_query}")
+    if namespace:
+        logger.info(f"Scoping analysis to namespace: {namespace}")
     
     # Initialize state
     initial_state: InfraState = {
@@ -131,6 +134,10 @@ def run_engine(user_query: str) -> InfraState:
         "strategic_summary": "",
         "final_report": "",
     }
+    
+    # Pass namespace through context
+    if namespace:
+        initial_state["target_namespace"] = namespace
     
     # Get graph
     graph = get_graph()
