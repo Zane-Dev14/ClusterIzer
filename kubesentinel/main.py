@@ -1,10 +1,4 @@
-"""
-KubeSentinel CLI - main entry point.
-
-Typer-based CLI for running Kubernetes intelligence analysis.
-Single command: scan
-"""
-
+"""KubeSentinel CLI - main entry point."""
 import json
 import logging
 import sys
@@ -27,12 +21,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Create Typer app
-app = typer.Typer(
-    name="kubesentinel",
-    help="KubeSentinel - Kubernetes Intelligence Engine",
-    add_completion=False
-)
+app = typer.Typer(name="kubesentinel", help="KubeSentinel - Kubernetes Intelligence Engine", add_completion=False)
 
 # Rich console for pretty output
 console = Console()
@@ -71,24 +60,12 @@ def scan(
 ):
     """
     Scan and analyze Kubernetes cluster infrastructure.
-    
-    Connects to the configured cluster (via kubeconfig or in-cluster),
-    extracts bounded state, generates signals, runs DeepAgent analysis,
-    and produces a comprehensive markdown report.
     """
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Verbose logging enabled")
-    
-    # Default query
-    if not query:
-        query = "Full cluster analysis"
-    
-    console.print(Panel.fit(
-        f"[bold cyan]KubeSentinel - Kubernetes Intelligence Engine[/bold cyan]\n"
-        f"Query: [yellow]{query}[/yellow]",
-        border_style="cyan"
-    ))
+    query = query or "Full cluster analysis"
+    console.print(Panel.fit(f"[bold cyan]KubeSentinel[/bold cyan]\nQuery: [yellow]{query}[/yellow]", border_style="cyan"))
     
     try:
         # Run engine
@@ -98,115 +75,53 @@ def scan(
         # Build report
         console.print("📝 [bold]Generating report...[/bold]")
         build_report(state)
-        
-        # Handle CI/JSON mode
         if json_output or ci_mode:
-            exit_code = _handle_ci_mode(state, json_output)
-            sys.exit(exit_code)
-        
-        # Display summary
+            sys.exit(_handle_ci_mode(state, json_output))
         _display_summary(state)
-        
-        console.print(
-            "\n✅ [bold green]Analysis complete![/bold green] "
-            "Report written to [cyan]report.md[/cyan]\n"
-        )
-        
+        console.print("\n✅ [bold green]Complete![/bold green] Report: [cyan]report.md[/cyan]\n")
         sys.exit(0)
-        
     except RuntimeError as e:
         console.print(f"\n❌ [bold red]Error:[/bold red] {e}\n", style="red")
-        logger.error(f"Execution failed: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
     except KeyboardInterrupt:
-        console.print("\n⚠️  [yellow]Interrupted by user[/yellow]\n")
+        console.print("\n⚠️  [yellow]Interrupted[/yellow]\n")
         sys.exit(130)
     except Exception as e:
-        console.print(f"\n❌ [bold red]Unexpected error:[/bold red] {e}\n", style="red")
-        logger.error(f"Unexpected error: {e}", exc_info=True)
+        console.print(f"\n❌ [bold red]Unexpected:[/bold red] {e}\n", style="red")
+        logger.error(f"Unexpected: {e}", exc_info=True)
         sys.exit(1)
 
 
 def _display_summary(state: InfraState) -> None:
-    """Display rich summary table."""
+    """Display rich summary."""
     risk = state.get("risk_score", {})
     signals = state.get("signals", [])
-    failure_findings = state.get("failure_findings", [])
-    cost_findings = state.get("cost_findings", [])
-    security_findings = state.get("security_findings", [])
-    
-    # Risk score panel
-    score = risk.get("score", 0)
-    grade = risk.get("grade", "N/A")
-    
-    grade_color = {
-        "A": "green",
-        "B": "blue",
-        "C": "yellow",
-        "D": "orange",
-        "F": "red"
-    }.get(grade, "white")
-    
-    console.print(f"\n⚠️  [bold]Risk Score:[/bold] {score}/100 (Grade: [{grade_color}]{grade}[/{grade_color}])")
-    
-    # Findings table
-    table = Table(title="Analysis Summary", show_header=True, header_style="bold magenta")
+    failure, cost, security = state.get("failure_findings", []), state.get("cost_findings", []), state.get("security_findings", [])
+    score, grade = risk.get("score", 0), risk.get("grade", "N/A")
+    grade_color = {"A": "green", "B": "blue", "C": "yellow", "D": "orange", "F": "red"}.get(grade, "white")
+    console.print(f"\n⚠️  [bold]Risk:[/bold] {score}/100 ([{grade_color}]{grade}[/{grade_color}])")
+    table = Table(title="Summary", show_header=True, header_style="bold magenta")
     table.add_column("Category", style="cyan", width=20)
     table.add_column("Count", justify="right", style="yellow")
-    
-    table.add_row("Signals", str(len(signals)))
-    table.add_row("Failure Findings", str(len(failure_findings)))
-    table.add_row("Cost Findings", str(len(cost_findings)))
-    table.add_row("Security Findings", str(len(security_findings)))
-    
+    for name, count in [("Signals", len(signals)), ("Failure Findings", len(failure)), ("Cost Findings", len(cost)), ("Security Findings", len(security))]:
+        table.add_row(name, str(count))
     console.print()
     console.print(table)
 
 
 def _handle_ci_mode(state: InfraState, json_output: bool) -> int:
-    """Handle CI mode execution.
-    
-    Returns:
-        Exit code: 0 if grade < D, 1 if grade >= D
-    """
+    """Handle CI mode execution."""
     risk = state.get("risk_score", {})
-    grade = risk.get("grade", "F")
-    score = risk.get("score", 100)
-    signals = state.get("signals", [])
-    
-    # Determine exit code based on grade
+    grade, score, signals = risk.get("grade", "F"), risk.get("score", 100), state.get("signals", [])
     exit_code = 0 if grade in ["A", "B", "C"] else 1
-    
     if json_output:
-        # Clean JSON output with full findings
-        result = {
-            "metadata": {
-                "version": "0.1.0",
-                "timestamp": __import__("datetime").datetime.utcnow().isoformat()
-            },
-            "risk": {
-                "grade": grade,
-                "score": score,
-                "total_signals": len(signals)
-            },
-            "findings": {
-                "reliability": state.get("failure_findings", []),
-                "cost": state.get("cost_findings", []),
-                "security": state.get("security_findings", [])
-            },
-            "summary": state.get("strategic_summary", ""),
-            "status": {
-                "exit_code": exit_code,
-                "passed": exit_code == 0
-            }
-        }
+        result = {"metadata": {"version": "0.1.0", "timestamp": __import__("datetime").datetime.utcnow().isoformat()}, "risk": {"grade": grade, "score": score, "total_signals": len(signals)}, "findings": {"reliability": state.get("failure_findings", []), "cost": state.get("cost_findings", []), "security": state.get("security_findings", [])}, "summary": state.get("strategic_summary", ""), "status": {"exit_code": exit_code, "passed": exit_code == 0}}
         console.print(json.dumps(result, indent=2))
     else:
-        # Minimal CI output
         status = "✅ PASSED" if exit_code == 0 else "❌ FAILED"
-        console.print(f"\n{status} - Risk Grade: {grade} (Score: {score}/100)")
+        console.print(f"\n{status} - Risk: {grade} ({score}/100)")
         console.print("Report: report.md\n")
-    
     return exit_code
 
 

@@ -1,10 +1,4 @@
-"""
-Report builder - generates structured markdown reports.
-
-Pure function that transforms InfraState into a comprehensive
-markdown report. No LLM involvement in structure.
-"""
-
+"""Report builder - generates structured markdown reports."""
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
@@ -15,64 +9,21 @@ logger = logging.getLogger(__name__)
 
 
 def build_report(state: InfraState) -> str:
-    """
-    Build comprehensive markdown report from state.
-    
-    Sections:
-    1. Architecture Report - cluster summary and graph metrics
-    2. Cost Optimization Report - cost findings
-    3. Security Audit - security findings
-    4. Reliability Risk Score - risk assessment
-    5. Strategic AI Explanation - synthesizer output
-    
-    Args:
-        state: Final InfraState with all analysis complete
-        
-    Returns:
-        Markdown report string
-    """
+    """Build comprehensive markdown report from state."""
     logger.info("Building markdown report...")
-    
     sections = []
-    
-    # Header
     sections.append("# KubeSentinel Infrastructure Intelligence Report\n")
     sections.append(f"**Analysis Query:** {state.get('user_query')}\n")
     sections.append("---\n")
-    
-    # 1. Architecture Report
     sections.append(_build_architecture_section(state))
-    
-    # 2. Cost Optimization Report
-    sections.append(_build_findings_section(
-        "💰 Cost Optimization Report", 
-        state.get("cost_findings", []),
-        "cost optimization issues"
-    ))
-    
-    # 3. Security Audit
-    sections.append(_build_findings_section(
-        "🔐 Security Audit",
-        state.get("security_findings", []),
-        "security issues"
-    ))
-    
-    # 4. Reliability Risk Score
+    sections.append(_build_findings_section("💰 Cost Optimization Report", state.get("cost_findings", []), "cost optimization issues"))
+    sections.append(_build_findings_section("🔐 Security Audit", state.get("security_findings", []), "security issues"))
     sections.append(_build_risk_section(state))
-    
-    # 5. Strategic AI Explanation
     sections.append(_build_strategic_section(state))
-    
     report = "\n".join(sections)
-    
-    # Write to file
-    output_path = Path("report.md")
-    output_path.write_text(report)
-    logger.info(f"Report written to {output_path.absolute()}")
-    
-    # Update state
+    Path("report.md").write_text(report)
+    logger.info(f"Report written to {Path('report.md').absolute()}")
     state["final_report"] = report
-    
     return report
 
 

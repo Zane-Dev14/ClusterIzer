@@ -1,10 +1,4 @@
-"""
-Agent nodes - planner, specialized agents, and synthesizer.
-
-All agents in this file. Uses create_agent from langchain.agents
-for the sub-agents. Planner is deterministic.
-"""
-
+"""Agent nodes - planner, specialized agents, and synthesizer."""
 import json
 import logging
 from pathlib import Path
@@ -25,29 +19,10 @@ LLM = ChatOllama(
     temperature=0
 )
 
-# Prompt directory
 PROMPT_DIR = Path(__file__).parent / "prompts"
 
-
-def _load_prompt(filename: str) -> str:
-    """Load prompt from file."""
-    path = PROMPT_DIR / filename
-    return path.read_text()
-
-
 def planner_node(state: InfraState) -> InfraState:
-    """
-    Deterministic planner that decides which agents to run.
-    
-    Inspects user_query and signals to determine relevant agents.
-    This is NOT an LLM call - it's keyword-based routing.
-    
-    Args:
-        state: InfraState with user_query and signals
-        
-    Returns:
-        Updated state with planner_decision set
-    """
+    """Deterministic planner that decides which agents to run based on query keywords."""
     logger.info("Planning agent execution...")
     
     query = state.get("user_query", "").lower()
@@ -75,286 +50,112 @@ def planner_node(state: InfraState) -> InfraState:
             unique_agents.append(agent)
     
     logger.info(f"Planner selected agents: {unique_agents}")
-    
     state["planner_decision"] = unique_agents
     return state
 
-
 def failure_agent_node(state: InfraState) -> InfraState:
-    """
-    Reliability and failure analysis agent.
-    
-    Uses create_agent to analyze reliability signals with tools.
-    Skips execution if not selected by planner.
-    
-    Args:
-        state: InfraState with deterministic data populated
-        
-    Returns:
-        Updated state with failure_findings
-    """
-    # Check if this agent should run
+    """Reliability analysis agent - analyzes failure signals."""
     if "failure_agent" not in state.get("planner_decision", []):
-        logger.info("Skipping failure_agent (not selected by planner)")
+        logger.info("Skipping failure_agent")
         state["failure_findings"] = []
         return state
-    
     logger.info("Running failure_agent...")
-    
     try:
-        findings = _run_agent(
-            state=state,
-            agent_name="failure_agent",
-            prompt_file="failure_agent.txt",
-            category="reliability"
-        )
+        findings = _run_agent(state, "failure_agent", "failure_agent.txt", "reliability")
         state["failure_findings"] = findings[:MAX_FINDINGS]
     except Exception as e:
-        logger.error(f"Failure agent error: {e}", exc_info=True)
+        logger.error(f"Failure agent error: {e}")
         state["failure_findings"] = []
-    
     return state
 
 
 def cost_agent_node(state: InfraState) -> InfraState:
-    """
-    Cost optimization analysis agent.
-    
-    Uses create_agent to analyze cost signals with tools.
-    Skips execution if not selected by planner.
-    
-    Args:
-        state: InfraState with deterministic data populated
-        
-    Returns:
-        Updated state with cost_findings
-    """
-    # Check if this agent should run
+    """Cost optimization agent - analyzes cost signals."""
     if "cost_agent" not in state.get("planner_decision", []):
-        logger.info("Skipping cost_agent (not selected by planner)")
+        logger.info("Skipping cost_agent")
         state["cost_findings"] = []
         return state
-    
     logger.info("Running cost_agent...")
-    
     try:
-        findings = _run_agent(
-            state=state,
-            agent_name="cost_agent",
-            prompt_file="cost_agent.txt",
-            category="cost"
-        )
+        findings = _run_agent(state, "cost_agent", "cost_agent.txt", "cost")
         state["cost_findings"] = findings[:MAX_FINDINGS]
     except Exception as e:
-        logger.error(f"Cost agent error: {e}", exc_info=True)
+        logger.error(f"Cost agent error: {e}")
         state["cost_findings"] = []
-    
     return state
 
 
 def security_agent_node(state: InfraState) -> InfraState:
-    """
-    Security audit analysis agent.
-    
-    Uses create_agent to analyze security signals with tools.
-    Skips execution if not selected by planner.
-    
-    Args:
-        state: InfraState with deterministic data populated
-        
-    Returns:
-        Updated state with security_findings
-    """
-    # Check if this agent should run
+    """Security audit agent - analyzes security signals."""
     if "security_agent" not in state.get("planner_decision", []):
-        logger.info("Skipping security_agent (not selected by planner)")
+        logger.info("Skipping security_agent")
         state["security_findings"] = []
         return state
-    
     logger.info("Running security_agent...")
-    
     try:
-        findings = _run_agent(
-            state=state,
-            agent_name="security_agent",
-            prompt_file="security_agent.txt",
-            category="security"
-        )
+        findings = _run_agent(state, "security_agent", "security_agent.txt", "security")
         state["security_findings"] = findings[:MAX_FINDINGS]
     except Exception as e:
-        logger.error(f"Security agent error: {e}", exc_info=True)
+        logger.error(f"Security agent error: {e}")
         state["security_findings"] = []
-    
     return state
 
 
-def _run_agent(
-    state: InfraState,
-    agent_name: str,
-    prompt_file: str,
-    category: str
-) -> List[Dict[str, Any]]:
-    """
-    Run an agent with tools and parse JSON findings.
+def _run_agent(state: InfraState, agent_name: str, prompt_file: str, category: str) -> List[Dict[str, Any]]:
+    """Run agent with tools and parse JSON findings."""
+    system_prompt = (PROMPT_DIR / prompt_file).read_text()
     
-    Uses create_agent from langchain.agents.
-    
-    Args:
-        state: Current InfraState
-        agent_name: Name for logging
-        prompt_file: Prompt file to load
-        category: Signal category to summarize
-        
-    Returns:
-        List of finding dicts
-    """
-    # Load system prompt
-    system_prompt = _load_prompt(prompt_file)
-    
-    # Create tools with state closure
     tools = make_tools(state)
-    
-    # Create agent
-    agent = create_agent(
-        LLM,
-        tools,
-        system_prompt=system_prompt
-    )
-    
-    # Build human message summarizing signals
+    agent = create_agent(LLM, tools, system_prompt=system_prompt)
     signals = state.get("signals", [])
     category_signals = [s for s in signals if s.get("category") == category]
-    
     human_msg = f"""Analyze the {category} signals and provide findings.
-
 Signal count: {len(category_signals)}
-
-Use the provided tools to gather additional context:
-- get_signals(category="{category}")
-- get_graph_summary()
-- get_cluster_summary()
-- get_risk_score()
-
-Return your findings as a JSON array as specified in your instructions.
-"""
-    
-    # Invoke agent
-    result = agent.invoke({
-        "messages": [HumanMessage(content=human_msg)]
-    })
-    
-    # Extract findings from messages
+Use tools: get_signals(category="{category}"), get_graph_summary(), get_cluster_summary(), get_risk_score()
+Return findings as JSON array per your instructions."""
+    result = agent.invoke({"messages": [HumanMessage(content=human_msg)]})
     findings = _extract_json_findings(result)
-    
     logger.info(f"{agent_name} produced {len(findings)} findings")
     return findings
 
 
 def _extract_json_findings(result: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    """
-    Extract JSON findings array from agent messages.
-    
-    Looks for JSON in the last message content.
-    """
-    if result is None:
+    """Extract JSON findings array from agent messages."""
+    if not result or not (messages := result.get("messages", [])):
         return []
-    
-    messages = result.get("messages", [])
-    if not messages:
-        return []
-    
-    # Get last message content
     last_msg = messages[-1]
     content = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
-    if not isinstance(content, str):
-        content = str(content)
-    
-    # Try to find JSON array in content
+    content = str(content) if not isinstance(content, str) else content
     try:
-        # Look for JSON array markers
-        start = content.find('[')
-        end = content.rfind(']')
-        
+        start, end = content.find('['), content.rfind(']')
         if start != -1 and end != -1 and end > start:
-            json_str = content[start:end+1]
-            findings = json.loads(json_str)
-            
+            findings = json.loads(content[start:end+1])
             if isinstance(findings, list):
-                # Validate each finding has required keys
-                validated = []
-                for f in findings:
-                    if isinstance(f, dict) and all(k in f for k in ["resource", "severity", "analysis", "recommendation"]):
-                        validated.append(f)
-                return validated
+                return [f for f in findings if isinstance(f, dict) and 
+                       all(k in f for k in ["resource", "severity", "analysis", "recommendation"])]
     except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse JSON findings: {e}")
-    
+        logger.warning(f"Failed to parse JSON: {e}")
     return []
 
 
 def synthesizer_node(state: InfraState) -> InfraState:
-    """
-    Strategic synthesis agent.
-    
-    Produces executive summary integrating all findings and risk score.
-    Uses LLM directly (no tools, no ReAct).
-    
-    Args:
-        state: InfraState with all agent findings
-        
-    Returns:
-        Updated state with strategic_summary
-    """
+    """Strategic synthesis agent - produces executive summary."""
     logger.info("Running synthesizer...")
-    
-    # Load system prompt
-    system_prompt = _load_prompt("synthesizer.txt")
-    
-    # Build context from findings
-    failure_findings = state.get("failure_findings", [])
-    cost_findings = state.get("cost_findings", [])
-    security_findings = state.get("security_findings", [])
-    risk_score = state.get("risk_score", {})
-    
-    context = f"""
-Risk Score: {risk_score.get('score', 0)}/100 (Grade: {risk_score.get('grade', 'N/A')})
-Signals: {risk_score.get('signal_count', 0)}
-
-Failure Findings: {len(failure_findings)}
-{json.dumps(failure_findings[:10], indent=2)}
-
-Cost Findings: {len(cost_findings)}
-{json.dumps(cost_findings[:10], indent=2)}
-
-Security Findings: {len(security_findings)}
-{json.dumps(security_findings[:10], indent=2)}
-
-Produce your strategic summary following the format in your instructions.
-"""
-    
+    system_prompt = (PROMPT_DIR / "synthesizer.txt").read_text()
+    failure, cost, security = state.get("failure_findings", []), state.get("cost_findings", []), state.get("security_findings", [])
+    risk = state.get("risk_score", {})
+    context = f"""Risk: {risk.get('score', 0)}/100 (Grade: {risk.get('grade', 'N/A')}), Signals: {risk.get('signal_count', 0)}
+Failure: {len(failure)} - {json.dumps(failure[:10], indent=2)}
+Cost: {len(cost)} - {json.dumps(cost[:10], indent=2)}
+Security: {len(security)} - {json.dumps(security[:10], indent=2)}
+Produce strategic summary per your instructions."""
     try:
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=context)
-        ]
-        
-        response = LLM.invoke(messages)
-        # Ensure response is string (handle list or other types)
-        if hasattr(response, 'content'):
-            content = response.content
-            summary = str(content) if not isinstance(content, str) else content
-        else:
-            summary = str(response)
-        
-        # Cap at ~1000 tokens (rough estimate: 4 chars per token)
-        if len(summary) > 4000:
-            summary = summary[:4000] + "\n\n[Summary truncated]"
-        
-        state["strategic_summary"] = summary
+        response = LLM.invoke([SystemMessage(content=system_prompt), HumanMessage(content=context)])
+        summary = response.content if hasattr(response, 'content') else str(response)
+        summary = str(summary) if not isinstance(summary, str) else summary
+        state["strategic_summary"] = summary[:4000] + "\n[Summary truncated]" if len(summary) > 4000 else summary
         logger.info("Synthesizer complete")
-        
     except Exception as e:
-        logger.error(f"Synthesizer error: {e}", exc_info=True)
+        logger.error(f"Synthesizer error: {e}")
         state["strategic_summary"] = "Error generating strategic summary."
-    
     return state

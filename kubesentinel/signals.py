@@ -1,10 +1,4 @@
-"""
-Signal engine node - generates deterministic signals from cluster state.
-
-Analyzes cluster snapshot and graph summary to produce structured signals
-across reliability, security, and cost categories. Pure function, no LLM.
-"""
-
+"""Signal engine - generates deterministic signals from cluster state."""
 import logging
 from typing import Dict, Any, List, Set, Tuple
 
@@ -16,18 +10,12 @@ logger = logging.getLogger(__name__)
 def generate_signals(state: InfraState) -> InfraState:
     """Generate deterministic signals from cluster snapshot and graph."""
     logger.info("Generating signals...")
-    
-    snapshot = state["cluster_snapshot"]
-    graph = state["graph_summary"]
-    signals: List[Dict[str, Any]] = []
-    seen: Set[Tuple[str, str, str]] = set()
-    
-    # Generate all signal types
+    snapshot, graph = state["cluster_snapshot"], state["graph_summary"]
+    signals, seen = [], set()
     _generate_pod_signals(snapshot, seen, signals)
     _generate_deployment_signals(snapshot, graph, seen, signals)
     _generate_container_signals(snapshot, seen, signals)
     _generate_service_signals(snapshot, graph, seen, signals)
-    
     signals = signals[:MAX_SIGNALS]
     logger.info(f"Generated {len(signals)} signals")
     state["signals"] = signals
@@ -49,15 +37,11 @@ def _generate_pod_signals(snapshot: Dict[str, Any], seen: Set, signals: List) ->
         resource = f"pod/{pod['namespace']}/{pod['name']}"
         if pod.get("crash_loop_backoff"):
             _add_signal(signals, seen, "reliability", "critical", resource, "Pod in CrashLoopBackOff state")
-        
         for cs in pod.get("container_statuses", []):
             if not cs.get("ready") and cs.get("state") != "Running":
-                _add_signal(signals, seen, "reliability", "high", resource,
-                           f"Container {cs['name']} not ready (state: {cs.get('state', 'unknown')})")
+                _add_signal(signals, seen, "reliability", "high", resource, f"Container {cs['name']} not ready (state: {cs.get('state', 'unknown')})")
 
-
-def _generate_deployment_signals(snapshot: Dict[str, Any], graph: Dict[str, Any], 
-                                 seen: Set, signals: List) -> None:
+def _generate_deployment_signals(snapshot: Dict[str, Any], graph: Dict[str, Any], seen: Set, signals: List) -> None:
     """Generate deployment-related signals."""
     dep_map = {d["name"]: d for d in snapshot["deployments"]}
     
@@ -77,7 +61,6 @@ def _generate_deployment_signals(snapshot: Dict[str, Any], graph: Dict[str, Any]
 
 
 def _generate_container_signals(snapshot: Dict[str, Any], seen: Set, signals: List) -> None:
-    """Generate container-related security and cost signals."""
     for dep in snapshot["deployments"]:
         resource = f"deployment/{dep['namespace']}/{dep['name']}"
         for container in dep.get("containers", []):
