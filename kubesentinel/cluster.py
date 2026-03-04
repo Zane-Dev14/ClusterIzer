@@ -44,25 +44,52 @@ def scan_cluster(state: InfraState) -> InfraState:
     deployments = _extract_deployments(deployments_raw.items[:MAX_DEPLOYMENTS])
     pods = _extract_pods(pods_raw.items[:MAX_PODS])
     services = _extract_services(services_raw.items[:MAX_SERVICES])
-    logger.info(f"Scan complete: {len(nodes)} nodes, {len(deployments)} deployments, {len(pods)} pods, {len(services)} services")
-    state["cluster_snapshot"] = {"nodes": nodes, "deployments": deployments, "pods": pods, "services": services}
+    
+    # Fetch ReplicaSets for ownership resolution
+    try:
+        if target_namespace:
+            replicasets_raw = apps_v1.list_namespaced_replica_set(namespace=target_namespace, limit=MAX_DEPLOYMENTS * 2)
+        else:
+            replicasets_raw = apps_v1.list_replica_set_for_all_namespaces(limit=MAX_DEPLOYMENTS * 2)
+        replicasets = _extract_replicasets(replicasets_raw.items[:MAX_DEPLOYMENTS * 2])
+    except ApiException as e:
+        logger.warning(f"Failed to fetch ReplicaSets: {e}")
+        replicasets = []
+    
+    logger.info(f"Scan complete: {len(nodes)} nodes, {len(deployments)} deployments, {len(pods)} pods, {len(services)} services, {len(replicasets)} replicasets")
+    state["cluster_snapshot"] = {"nodes": nodes, "deployments": deployments, "pods": pods, "services": services, "replicasets": replicasets}
     return state
 
 
 def _extract_nodes(nodes: List[Any]) -> List[Dict[str, Any]]:
-    """Extract slim node information."""
+    """Extract node information with allocatable resources and instance metadata."""
     result = []
     for node in nodes:
         allocatable = node.status.allocatable or {}
-        result.append({"name": node.metadata.name, "allocatable_cpu": allocatable.get("cpu", "unknown"), "allocatable_memory": allocatable.get("memory", "unknown")})
+        labels = dict(node.metadata.labels) if node.metadata.labels else {}
+        # Normalize allocatable resources
+        cpu_millicores = _parse_cpu_to_millicores(allocatable.get("cpu", "0"))
+        memory_mib = _parse_memory_to_mib(allocatable.get("memory", "0"))
+        result.append({
+            "name": node.metadata.name,
+            "allocatable_cpu": allocatable.get("cpu", "unknown"),
+            "allocatable_memory": allocatable.get("memory", "unknown"),
+            "allocatable_cpu_millicores": cpu_millicores,
+            "allocatable_memory_mib": memory_mib,
+            "instance_type": labels.get("node.kubernetes.io/instance-type", labels.get("beta.kubernetes.io/instance-type", "unknown")),
+            "labels": labels
+        })
     return result
 
 
 def _extract_deployments(deployments: List[Any]) -> List[Dict[str, Any]]:
-    """Extract slim deployment information."""
+    """Extract deployment information with labels and normalized resources."""
     result = []
     for dep in deployments:
         replicas = dep.spec.replicas if dep.spec.replicas is not None else 1
+        labels = dict(dep.metadata.labels) if dep.metadata.labels else {}
+        pod_labels = dict(dep.spec.template.metadata.labels) if dep.spec.template.metadata.labels else {}
+        selector = dep.spec.selector.match_labels if dep.spec.selector and dep.spec.selector.match_labels else {}
         containers = []
         for container in (dep.spec.template.spec.containers or []):
             privileged = container.security_context.privileged or False if container.security_context else False
@@ -70,21 +97,52 @@ def _extract_deployments(deployments: List[Any]) -> List[Dict[str, Any]]:
             if container.resources:
                 requests = dict(container.resources.requests) if container.resources.requests else {}
                 limits = dict(container.resources.limits) if container.resources.limits else {}
-            containers.append({"name": container.name, "image": container.image, "privileged": privileged, "requests": requests, "limits": limits})
-        result.append({"name": dep.metadata.name, "namespace": dep.metadata.namespace, "replicas": replicas, "containers": containers})
+            # Normalize resources
+            cpu_req_millicores = _parse_cpu_to_millicores(requests.get("cpu", "0"))
+            mem_req_mib = _parse_memory_to_mib(requests.get("memory", "0"))
+            cpu_lim_millicores = _parse_cpu_to_millicores(limits.get("cpu", "0"))
+            mem_lim_mib = _parse_memory_to_mib(limits.get("memory", "0"))
+            containers.append({
+                "name": container.name,
+                "image": container.image,
+                "privileged": privileged,
+                "requests": requests,
+                "limits": limits,
+                "requests_cpu_millicores": cpu_req_millicores,
+                "requests_memory_mib": mem_req_mib,
+                "limits_cpu_millicores": cpu_lim_millicores,
+                "limits_memory_mib": mem_lim_mib
+            })
+        result.append({
+            "name": dep.metadata.name,
+            "namespace": dep.metadata.namespace,
+            "replicas": replicas,
+            "labels": labels,
+            "pod_labels": pod_labels,
+            "selector": selector,
+            "containers": containers
+        })
     return result
 
 
 def _extract_pods(pods: List[Any]) -> List[Dict[str, Any]]:
-    """Extract slim pod information with CrashLoopBackOff detection."""
+    """Extract pod information with labels, ownerReferences, and status."""
     result = []
     for pod in pods:
         crash_loop, container_statuses = False, []
+        labels = dict(pod.metadata.labels) if pod.metadata.labels else {}
+        owner_refs = []
+        if pod.metadata.owner_references:
+            for owner in pod.metadata.owner_references:
+                owner_refs.append({
+                    "kind": owner.kind,
+                    "name": owner.name,
+                    "uid": owner.uid,
+                    "controller": owner.controller if hasattr(owner, 'controller') else False
+                })
         if pod.status.container_statuses:
             for cs in pod.status.container_statuses:
                 status_dict = {"name": cs.name, "ready": cs.ready, "restart_count": cs.restart_count}
-                
-                # Check for CrashLoopBackOff
                 if cs.state and cs.state.waiting:
                     reason = cs.state.waiting.reason or ""
                     status_dict["state"] = reason
@@ -97,10 +155,74 @@ def _extract_pods(pods: List[Any]) -> List[Dict[str, Any]]:
                 else:
                     status_dict["state"] = "Unknown"
                 container_statuses.append(status_dict)
-        result.append({"name": pod.metadata.name, "namespace": pod.metadata.namespace, "phase": pod.status.phase, "node_name": pod.spec.node_name or "unscheduled", "crash_loop_backoff": crash_loop, "container_statuses": container_statuses})
+        result.append({
+            "name": pod.metadata.name,
+            "namespace": pod.metadata.namespace,
+            "phase": pod.status.phase,
+            "node_name": pod.spec.node_name or "unscheduled",
+            "labels": labels,
+            "owner_references": owner_refs,
+            "crash_loop_backoff": crash_loop,
+            "container_statuses": container_statuses
+        })
     return result
 
 
 def _extract_services(services: List[Any]) -> List[Dict[str, Any]]:
-    """Extract slim service information."""
+    """Extract service information with selector details."""
     return [{"name": svc.metadata.name, "namespace": svc.metadata.namespace, "type": svc.spec.type, "selector": dict(svc.spec.selector) if svc.spec.selector else {}} for svc in services]
+
+
+def _extract_replicasets(replicasets: List[Any]) -> List[Dict[str, Any]]:
+    """Extract ReplicaSet information with ownerReferences."""
+    result = []
+    for rs in replicasets:
+        owner_refs = []
+        if rs.metadata.owner_references:
+            for owner in rs.metadata.owner_references:
+                owner_refs.append({
+                    "kind": owner.kind,
+                    "name": owner.name,
+                    "uid": owner.uid,
+                    "controller": owner.controller if hasattr(owner, 'controller') else False
+                })
+        result.append({
+            "name": rs.metadata.name,
+            "namespace": rs.metadata.namespace,
+            "uid": rs.metadata.uid,
+            "owner_references": owner_refs
+        })
+    return result
+
+
+def _parse_cpu_to_millicores(cpu_str: str) -> int:
+    """Parse Kubernetes CPU string to millicores."""
+    if not cpu_str or cpu_str == "0" or cpu_str == "unknown":
+        return 0
+    cpu_str = str(cpu_str)
+    if cpu_str.endswith("m"):
+        return int(cpu_str[:-1])
+    try:
+        return int(float(cpu_str) * 1000)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _parse_memory_to_mib(mem_str: str) -> int:
+    """Parse Kubernetes memory string to MiB."""
+    if not mem_str or mem_str == "0" or mem_str == "unknown":
+        return 0
+    mem_str = str(mem_str)
+    # Handle different units
+    units = {"Ki": 1/1024, "Mi": 1, "Gi": 1024, "Ti": 1024*1024,
+             "K": 1/1024/1.024, "M": 1/1.024, "G": 1024/1.024, "T": 1024*1024/1.024}
+    for unit, multiplier in units.items():
+        if mem_str.endswith(unit):
+            try:
+                return int(float(mem_str[:-len(unit)]) * multiplier)
+            except (ValueError, TypeError):
+                return 0
+    try:
+        return int(float(mem_str) / (1024 * 1024))
+    except (ValueError, TypeError):
+        return 0

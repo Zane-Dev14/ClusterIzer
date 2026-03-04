@@ -1,10 +1,28 @@
 """Signal engine - generates deterministic signals from cluster state."""
 import logging
-from typing import Dict, Any, List, Set, Tuple
+from typing import Dict, Any, List, Set, Tuple, Optional
 
 from .models import InfraState, MAX_SIGNALS
 
 logger = logging.getLogger(__name__)
+
+
+# CIS Kubernetes Benchmark mappings (v1.7.0 controls)
+CIS_MAPPINGS = {
+    "privileged_container": "5.2.1",
+    "host_pid": "5.2.2",
+    "host_ipc": "5.2.3",
+    "host_network": "5.2.4",
+    "allow_privilege_escalation": "5.2.5",
+    "run_as_non_root": "5.2.6",
+    "image_pull_policy": "5.2.7",
+    "immutable_root_filesystem": "5.2.9",
+    "no_resource_limits": "5.2.12",
+    "latest_image_tag": "5.4.1",
+    "default_namespace": "5.7.3",
+    "no_liveness_probe": "5.1.1",
+    "no_readiness_probe": "5.1.2",
+}
 
 
 def generate_signals(state: InfraState) -> InfraState:
@@ -23,18 +41,32 @@ def generate_signals(state: InfraState) -> InfraState:
 
 
 def _add_signal(signals: List[Dict[str, Any]], seen: Set[Tuple[str, str, str]], 
-                category: str, severity: str, resource: str, message: str) -> None:
+                category: str, severity: str, resource: str, message: str,
+                cis_control: Optional[str] = None, signal_id: Optional[str] = None) -> None:
     """Add signal if not already seen."""
     key = (category, resource, message)
     if key not in seen:
         seen.add(key)
-        signals.append({"category": category, "severity": severity, "resource": resource, "message": message})
+        signal = {"category": category, "severity": severity, "resource": resource, "message": message}
+        if cis_control:
+            signal["cis_control"] = cis_control
+        if signal_id:
+            signal["signal_id"] = signal_id
+        signals.append(signal)
 
 
 def _generate_pod_signals(snapshot: Dict[str, Any], seen: Set, signals: List) -> None:
     """Generate pod-related reliability signals."""
     for pod in snapshot["pods"]:
         resource = f"pod/{pod['namespace']}/{pod['name']}"
+        
+        # Default namespace check
+        if pod['namespace'] == "default":
+            _add_signal(signals, seen, "security", "low", resource,
+                       "Pod running in default namespace",
+                       cis_control=CIS_MAPPINGS["default_namespace"],
+                       signal_id="default_namespace")
+        
         if pod.get("crash_loop_backoff"):
             _add_signal(signals, seen, "reliability", "critical", resource, "Pod in CrashLoopBackOff state")
         for cs in pod.get("container_statuses", []):
@@ -64,22 +96,29 @@ def _generate_container_signals(snapshot: Dict[str, Any], seen: Set, signals: Li
     for dep in snapshot["deployments"]:
         resource = f"deployment/{dep['namespace']}/{dep['name']}"
         for container in dep.get("containers", []):
-            # Security signals
+            # Security signals with CIS mappings
             if container.get("privileged"):
                 _add_signal(signals, seen, "security", "critical", resource,
-                           f"Container {container['name']} runs in privileged mode")
+                           f"Container {container['name']} runs in privileged mode",
+                           cis_control=CIS_MAPPINGS["privileged_container"],
+                           signal_id="privileged_container")
             
             image = container.get("image", "")
             if image.endswith(":latest") or ":" not in image:
                 _add_signal(signals, seen, "security", "high", resource,
-                           f"Container {container['name']} uses :latest or untagged image")
+                           f"Container {container['name']} uses :latest or untagged image",
+                           cis_control=CIS_MAPPINGS["latest_image_tag"],
+                           signal_id="latest_image_tag")
             
             # Cost/Security signals for missing limits
             if not container.get("limits"):
                 _add_signal(signals, seen, "security", "medium", resource,
-                           f"Container {container['name']} has no resource limits (security risk)")
+                           f"Container {container['name']} has no resource limits (security risk)",
+                           cis_control=CIS_MAPPINGS["no_resource_limits"],
+                           signal_id="no_resource_limits")
                 _add_signal(signals, seen, "cost", "medium", resource,
                            f"Container {container['name']} has no resource limits (cost risk)")
+
 
 
 def _generate_service_signals(snapshot: Dict[str, Any], graph: Dict[str, Any],
