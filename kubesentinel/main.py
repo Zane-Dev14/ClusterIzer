@@ -1,6 +1,6 @@
-"""KubeSentinel CLI - main entry point."""
 import json
 import logging
+import re
 import sys
 from typing import Optional
 
@@ -25,7 +25,6 @@ app = typer.Typer(name="kubesentinel", help="KubeSentinel - Kubernetes Intellige
 
 # Rich console for pretty output
 console = Console()
-
 
 @app.command()
 def scan(
@@ -58,22 +57,24 @@ def scan(
         help="Output results as JSON (implies --ci)"
     )
 ):
-    """
-    Scan and analyze Kubernetes cluster infrastructure.
-    """
-    if verbose:
+    if verbose and not json_output:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Verbose logging enabled")
+    elif json_output:
+        logging.getLogger().setLevel(logging.ERROR)
+        ci_mode = True
+
     query = query or "Full cluster analysis"
-    console.print(Panel.fit(f"[bold cyan]KubeSentinel[/bold cyan]\nQuery: [yellow]{query}[/yellow]", border_style="cyan"))
+    if not json_output:
+        console.print(Panel.fit(f"[bold cyan]KubeSentinel[/bold cyan]\nQuery: [yellow]{query}[/yellow]", border_style="cyan"))
     
     try:
-        # Run engine
-        console.print("\n🔍 [bold]Scanning cluster...[/bold]")
+        if not json_output:
+            console.print("\n🔍 [bold]Scanning cluster...[/bold]")
         state = run_engine(query, namespace=namespace)
         
-        # Build report
-        console.print("📝 [bold]Generating report...[/bold]")
+        if not json_output:
+            console.print("📝 [bold]Generating report...[/bold]")
         build_report(state)
         if json_output or ci_mode:
             sys.exit(_handle_ci_mode(state, json_output))
@@ -92,7 +93,6 @@ def scan(
         logger.error(f"Unexpected: {e}", exc_info=True)
         sys.exit(1)
 
-
 def _display_summary(state: InfraState) -> None:
     """Display rich summary."""
     risk = state.get("risk_score", {})
@@ -109,6 +109,21 @@ def _display_summary(state: InfraState) -> None:
     console.print()
     console.print(table)
 
+def _sanitize_json_text(text: str) -> str:
+    """Remove non-printable control characters for JSON safety."""
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text or "")
+
+
+def _sanitize_for_json(value):
+    """Recursively sanitize nested values for JSON output."""
+    if isinstance(value, str):
+        return _sanitize_json_text(value)
+    if isinstance(value, list):
+        return [_sanitize_for_json(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_for_json(item) for key, item in value.items()}
+    return value
+
 
 def _handle_ci_mode(state: InfraState, json_output: bool) -> int:
     """Handle CI mode execution."""
@@ -116,21 +131,35 @@ def _handle_ci_mode(state: InfraState, json_output: bool) -> int:
     grade, score, signals = risk.get("grade", "F"), risk.get("score", 100), state.get("signals", [])
     exit_code = 0 if grade in ["A", "B", "C"] else 1
     if json_output:
-        result = {"metadata": {"version": "0.1.0", "timestamp": __import__("datetime").datetime.utcnow().isoformat()}, "risk": {"grade": grade, "score": score, "total_signals": len(signals)}, "findings": {"reliability": state.get("failure_findings", []), "cost": state.get("cost_findings", []), "security": state.get("security_findings", [])}, "summary": state.get("strategic_summary", ""), "status": {"exit_code": exit_code, "passed": exit_code == 0}}
-        console.print(json.dumps(result, indent=2))
+        result = _sanitize_for_json({
+            "metadata": {
+                "version": "0.1.0",
+                "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+            },
+            "risk": risk,
+            "findings": {
+                "reliability": state.get("failure_findings", []),
+                "cost": state.get("cost_findings", []),
+                "security": state.get("security_findings", []),
+            },
+            "signals": signals,
+            "drift": state.get("_drift_analysis", {}),
+            "summary": state.get("strategic_summary", ""),
+            "status": {"exit_code": exit_code, "passed": exit_code == 0},
+        })
+        sys.stdout.write(json.dumps(result, indent=2, ensure_ascii=False))
+        sys.stdout.write("\n")
     else:
         status = "✅ PASSED" if exit_code == 0 else "❌ FAILED"
         console.print(f"\n{status} - Risk: {grade} ({score}/100)")
         console.print("Report: report.md\n")
     return exit_code
 
-
 @app.command()
 def version():
     """Show version information."""
     from . import __version__
     console.print(f"KubeSentinel version [cyan]{__version__}[/cyan]")
-
 
 if __name__ == "__main__":
     app()

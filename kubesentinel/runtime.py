@@ -1,6 +1,7 @@
-"""LangGraph runtime - orchestrates the full execution graph."""
 import logging
+from datetime import datetime
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -17,17 +18,105 @@ from .agents import (
     security_agent_node,
     synthesizer_node,
 )
+from .persistence import PersistenceManager, drift_to_signals
 
 logger = logging.getLogger(__name__)
+
+# Global persistence manager
+_persistence_manager: PersistenceManager | None = None
+
+def get_persistence_manager() -> PersistenceManager:
+    """Get or create persistence manager."""
+    global _persistence_manager
+    if _persistence_manager is None:
+        _persistence_manager = PersistenceManager()
+    return _persistence_manager
+
+def persist_snapshot(state: InfraState) -> InfraState:
+    """Persist current snapshot and detect drift."""
+    logger.info("Persisting snapshot...")
+    pm = get_persistence_manager()
+    
+    # Save snapshot - convert TypedDict to dict for persistence layer
+    state_dict = dict(state)
+    timestamp = pm.save_snapshot(state_dict)
+    state["_snapshot_persisted_at"] = timestamp
+    state["_snapshot_timestamp"] = datetime.utcnow().isoformat()
+    
+    # Detect drift against previous snapshot
+    drift_analysis = pm.analyze_drift(state_dict)
+    
+    # Convert critical drifts to signals
+    if drift_analysis.get("summary", {}).get("critical_lost_count", 0) > 0 or \
+       drift_analysis.get("summary", {}).get("critical_risky_count", 0) > 0:
+        old_signals = state.get("signals", [])
+        state["signals"] = drift_to_signals(drift_analysis, old_signals or [])
+    
+    state["_drift_analysis"] = drift_analysis
+    summary = drift_analysis.get("summary", {})
+    logger.info(f"Drift detected: {summary.get('total_changes', 0)} changes")
+    
+    return state
+
+def run_agents_parallel(state: InfraState) -> InfraState:
+    """Run selected agents concurrently and merge findings."""
+    selected = set(state.get("planner_decision", []))
+    agent_map = {
+        "failure_agent": (failure_agent_node, "failure_findings"),
+        "cost_agent": (cost_agent_node, "cost_findings"),
+        "security_agent": (security_agent_node, "security_findings"),
+    }
+
+    for _, findings_key in agent_map.values():
+        state.setdefault(findings_key,[]) # type: ignore
+
+    run_targets = {name: cfg for name, cfg in agent_map.items() if name in selected}
+    if not run_targets:
+        return state
+
+    logger.info("Running selected agents concurrently...")
+    with ThreadPoolExecutor(max_workers=len(run_targets)) as pool:
+        futures = {
+            pool.submit(func, dict(state)): (name, findings_key) #type: ignore
+            for name, (func, findings_key) in run_targets.items()
+        }
+        for future in as_completed(futures):
+            name, findings_key = futures[future]
+            try:
+                result_state = future.result()
+                state[findings_key] = result_state.get(findings_key, [])
+            except Exception as exc:
+                logger.error(f"{name} failed in parallel execution: {exc}")
+                state[findings_key] = []
+
+    return state
 
 
 def build_runtime_graph() -> Any:
     """Build the complete LangGraph execution graph."""
     logger.info("Building runtime graph...")
     builder = StateGraph(InfraState)
-    for name, func in [("scan_cluster", scan_cluster), ("build_graph", build_graph), ("generate_signals", generate_signals), ("compute_risk", compute_risk), ("planner", planner_node), ("failure_agent", failure_agent_node), ("cost_agent", cost_agent_node), ("security_agent", security_agent_node), ("synthesizer", synthesizer_node)]:
+    for name, func in [
+        ("scan_cluster", scan_cluster),
+        ("build_graph", build_graph),
+        ("generate_signals", generate_signals),
+        ("persist_snapshot", persist_snapshot),
+        ("compute_risk", compute_risk),
+        ("planner", planner_node),
+        ("run_agents_parallel", run_agents_parallel),
+        ("synthesizer", synthesizer_node),
+    ]:
         builder.add_node(name, func)
-    for src, dst in [("scan_cluster", "build_graph"), ("build_graph", "generate_signals"), ("generate_signals", "compute_risk"), ("compute_risk", "planner"), ("planner", "failure_agent"), ("failure_agent", "cost_agent"), ("cost_agent", "security_agent"), ("security_agent", "synthesizer"), ("synthesizer", END)]:
+    for src, dst in [
+        ("scan_cluster", "build_graph"),
+        ("build_graph", "generate_signals"),
+        ("generate_signals", "persist_snapshot"),
+        ("persist_snapshot", "compute_risk"),
+        ("compute_risk", "planner"),
+        ("planner", "run_agents_parallel"),
+        ("run_agents_parallel", "synthesizer"),
+        ("synthesizer", END),
+    ]:
         builder.add_edge(src, dst)
     builder.set_entry_point("scan_cluster")
     graph = builder.compile(checkpointer=MemorySaver())
@@ -42,7 +131,6 @@ def get_graph():
     if _graph is None:
         _graph = build_runtime_graph()
     return _graph
-
 
 def run_engine(user_query: str, namespace: str | None = None) -> InfraState:
     """Run the complete KubeSentinel analysis engine."""

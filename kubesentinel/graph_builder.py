@@ -1,4 +1,3 @@
-"""Graph builder - constructs dependency graph and derived metrics."""
 import logging
 from typing import Dict, Any, List, Optional
 from collections import defaultdict
@@ -7,18 +6,17 @@ from .models import InfraState
 
 logger = logging.getLogger(__name__)
 
- 
 def build_graph(state: InfraState) -> InfraState:
     """Build dependency graph from cluster snapshot with ownership resolution."""
     logger.info("Building dependency graph...")
-    snapshot = state["cluster_snapshot"]
+    snapshot = state.get("cluster_snapshot", {})
     deployments = snapshot["deployments"]
     pods = snapshot["pods"]
     services = snapshot["services"]
     replicasets = snapshot.get("replicasets", [])
     
     # Build ownership index: pod -> replicaset -> deployment
-    ownership_index = _build_ownership_index(pods, replicasets, deployments)
+    ownership_index, broken_refs = _build_ownership_index(pods, replicasets, deployments)
     
     # Build adjacency mappings with proper label selector evaluation
     service_to_deployment = _map_services_to_deployments_via_labels(services, pods, ownership_index)
@@ -29,26 +27,35 @@ def build_graph(state: InfraState) -> InfraState:
     for pod in pods:
         if pod["node_name"] != "unscheduled":
             node_fanout_count[pod["node_name"]] += 1
-    graph_summary = {"service_to_deployment": service_to_deployment, "deployment_to_pods": deployment_to_pods, "pod_to_node": {f"{p['namespace']}/{p['name']}": p["node_name"] for p in pods}, "ownership_index": ownership_index, "orphan_services": orphan_services, "single_replica_deployments": single_replica_deployments, "node_fanout_count": dict(node_fanout_count)}
+    graph_summary = {
+        "service_to_deployment": service_to_deployment,
+        "deployment_to_pods": deployment_to_pods,
+        "pod_to_node": {f"{p['namespace']}/{p['name']}": p["node_name"] for p in pods},
+        "ownership_index": ownership_index,
+        "orphan_services": orphan_services,
+        "single_replica_deployments": single_replica_deployments,
+        "node_fanout_count": dict(node_fanout_count),
+        "broken_ownership_refs": broken_refs
+    }
     
     logger.info(
         f"Graph built: {len(orphan_services)} orphan services, "
         f"{len(single_replica_deployments)} single-replica deployments, "
-        f"{len(ownership_index)} ownership chains"
+        f"{len(ownership_index)} ownership chains, "
+        f"{len(broken_refs)} broken references"
     )
     
     state["graph_summary"] = graph_summary
     return state
 
-
-def _build_ownership_index(pods: List[Dict[str, Any]], replicasets: List[Dict[str, Any]], deployments: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
-    """
-    Build ownership chain index: pod_key -> {replicaset, deployment, top_controller}.
+def _build_ownership_index(pods: List[Dict[str, Any]], replicasets: List[Dict[str, Any]], deployments: List[Dict[str, Any]]) -> tuple[Dict[str, Dict[str, str]], List[Dict[str, Any]]]:
+    """Build ownership index and detect broken references.
     
-    Uses ownerReferences to resolve: Pod -> ReplicaSet -> Deployment.
-    Falls back gracefully if UID/ownerReferences are missing (older clusters or test fixtures).
+    Returns:
+        Tuple of (ownership_index, broken_references)
     """
     index = {}
+    broken_refs = []
     
     # Build UID lookup maps (skip resources without UIDs)
     rs_by_uid = {rs["uid"]: f"{rs['namespace']}/{rs['name']}" for rs in replicasets if "uid" in rs}
@@ -60,8 +67,17 @@ def _build_ownership_index(pods: List[Dict[str, Any]], replicasets: List[Dict[st
         for owner in rs.get("owner_references", []):
             if owner.get("kind") == "Deployment":
                 owner_uid = owner.get("uid")
-                if owner_uid and owner_uid in dep_by_uid:
-                    rs_to_dep[f"{rs['namespace']}/{rs['name']}"] = dep_by_uid[owner_uid]
+                if owner_uid:
+                    if owner_uid in dep_by_uid:
+                        rs_to_dep[f"{rs['namespace']}/{rs['name']}"] = dep_by_uid[owner_uid]
+                    else:
+                        # Broken reference: ReplicaSet references non-existent Deployment
+                        broken_refs.append({
+                            "resource_type": "replicaset",
+                            "resource_name": f"{rs['namespace']}/{rs['name']}",
+                            "missing_owner_kind": "Deployment",
+                            "missing_owner_uid": owner_uid
+                        })
                     break
     
     # Build Pod -> ReplicaSet -> Deployment chain
@@ -76,24 +92,42 @@ def _build_ownership_index(pods: List[Dict[str, Any]], replicasets: List[Dict[st
             if not owner_kind or not owner_uid:
                 continue
             
-            if owner_kind == "ReplicaSet" and owner_uid in rs_by_uid:
-                rs_key = rs_by_uid[owner_uid]
-                chain["replicaset"] = rs_key
-                
-                # Follow ReplicaSet -> Deployment
-                if rs_key in rs_to_dep:
-                    dep_key = rs_to_dep[rs_key]
+            if owner_kind == "ReplicaSet":
+                if owner_uid in rs_by_uid:
+                    rs_key = rs_by_uid[owner_uid]
+                    chain["replicaset"] = rs_key
+                    
+                    # Follow ReplicaSet -> Deployment
+                    if rs_key in rs_to_dep:
+                        dep_key = rs_to_dep[rs_key]
+                        chain["deployment"] = dep_key
+                        chain["top_controller"] = dep_key
+                    else:
+                        chain["top_controller"] = rs_key  # Orphaned RS
+                else:
+                    # Broken reference: Pod references non-existent ReplicaSet
+                    broken_refs.append({
+                        "resource_type": "pod",
+                        "resource_name": pod_key,
+                        "missing_owner_kind": "ReplicaSet",
+                        "missing_owner_uid": owner_uid
+                    })
+                break
+            
+            elif owner_kind == "Deployment":
+                if owner_uid in dep_by_uid:
+                    # Direct Deployment ownership (rare but possible)
+                    dep_key = dep_by_uid[owner_uid]
                     chain["deployment"] = dep_key
                     chain["top_controller"] = dep_key
                 else:
-                    chain["top_controller"] = rs_key  # Orphaned RS
-                break
-            
-            elif owner_kind == "Deployment" and owner_uid in dep_by_uid:
-                # Direct Deployment ownership (rare but possible)
-                dep_key = dep_by_uid[owner_uid]
-                chain["deployment"] = dep_key
-                chain["top_controller"] = dep_key
+                    # Broken reference: Pod references non-existent Deployment
+                    broken_refs.append({
+                        "resource_type": "pod",
+                        "resource_name": pod_key,
+                        "missing_owner_kind": "Deployment",
+                        "missing_owner_uid": owner_uid
+                    })
                 break
             
             elif owner_kind in ["StatefulSet", "DaemonSet", "Job", "CronJob"]:
@@ -104,15 +138,9 @@ def _build_ownership_index(pods: List[Dict[str, Any]], replicasets: List[Dict[st
         if chain["top_controller"]:
             index[pod_key] = chain
     
-    return index
-
+    return index, broken_refs
 
 def _map_services_to_deployments_via_labels(services: List[Dict[str, Any]], pods: List[Dict[str, Any]], ownership_index: Dict[str, Dict[str, str]]) -> Dict[str, List[str]]:
-    """
-    Map services to deployments via label selector evaluation.
-    
-    Uses proper label matching (not name prefix heuristics) and ownership chains.
-    """
     result = defaultdict(list)
     
     for svc in services:
@@ -145,12 +173,7 @@ def _map_services_to_deployments_via_labels(services: List[Dict[str, Any]], pods
     
     return dict(result)
 
-
 def _map_deployments_to_pods_via_ownership(pods: List[Dict[str, Any]], ownership_index: Dict[str, Dict[str, str]]) -> Dict[str, List[str]]:
-    """
-    Map deployments to their pods using ownership index.
-    Falls back to name prefix matching if ownership data is unavailable.
-    """
     result = defaultdict(list)
     
     # First pass: use ownership index (accurate)
@@ -185,13 +208,7 @@ def _map_deployments_to_pods_via_ownership(pods: List[Dict[str, Any]], ownership
     
     return dict(result)
 
-
 def _labels_match_selector(labels: Dict[str, str], selector: Dict[str, str]) -> bool:
-    """
-    Check if pod labels match service selector.
-    
-    Supports matchLabels semantics (all selector labels must match).
-    """
     if not selector:
         return False
     

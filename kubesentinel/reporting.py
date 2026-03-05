@@ -1,4 +1,3 @@
-"""Report builder - generates structured markdown reports."""
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
@@ -6,7 +5,6 @@ from typing import Dict, Any, List
 from .models import InfraState
 
 logger = logging.getLogger(__name__)
-
 
 def build_report(state: InfraState) -> str:
     """Build comprehensive markdown report from state."""
@@ -25,7 +23,6 @@ def build_report(state: InfraState) -> str:
     logger.info(f"Report written to {Path('report.md').absolute()}")
     state["final_report"] = report
     return report
-
 
 def _build_architecture_section(state: InfraState) -> str:
     """Build architecture overview section."""
@@ -78,7 +75,6 @@ def _build_architecture_section(state: InfraState) -> str:
     lines.append("---\n")
     return "\n".join(lines)
 
-
 def _build_findings_section(title: str, findings: List[Dict[str, Any]], issue_type: str) -> str:
     """Build findings section (cost/security/failure)."""
     lines = [f"## {title}\n"]
@@ -105,7 +101,6 @@ def _build_findings_section(title: str, findings: List[Dict[str, Any]], issue_ty
     
     lines.append("---\n")
     return "\n".join(lines)
-
 
 def _build_risk_section(state: InfraState) -> str:
     """Build risk score section."""
@@ -143,7 +138,6 @@ def _build_risk_section(state: InfraState) -> str:
     lines.append("---\n")
     return "\n".join(lines)
 
-
 def _build_strategic_section(state: InfraState) -> str:
     """Build strategic AI explanation section."""
     summary = state.get("strategic_summary", "")
@@ -162,7 +156,6 @@ def _build_strategic_section(state: InfraState) -> str:
     
     return "\n".join(lines)
 
-
 def _group_by_severity(items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Group items by severity."""
     result = {"critical": [], "high": [], "medium": [], "low": []}
@@ -172,7 +165,6 @@ def _group_by_severity(items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, 
             result[severity].append(item)
     return result
 
-
 def _group_by_category(items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Group items by category."""
     result = {"reliability": [], "security": [], "cost": []}
@@ -181,7 +173,6 @@ def _group_by_category(items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, 
         if category in result:
             result[category].append(item)
     return result
-
 
 def _severity_icon(severity: str) -> str:
     """Get emoji icon for severity."""

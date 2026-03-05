@@ -1,12 +1,11 @@
-"""Cost modeling engine - compute cluster costs and overcommit detection."""
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 from .models import InfraState
 
 logger = logging.getLogger(__name__)
 
-# Cloud provider pricing (USD per hour) - defaults approximating typical small instance costs
-# Users should override these via configuration
+# Cloud provider pricing (USD per hour) - for US/default region
+# Region adjustments applied via REGION_PRICE_MULTIPLIERS
 DEFAULT_PRICE_MAP = {
     "aws": {
         "t3.medium": {"vcpu": 2, "ram_gb": 4, "price_hour": 0.0416},
@@ -30,23 +29,28 @@ DEFAULT_PRICE_MAP = {
     "default": {"vcpu": 2, "ram_gb": 4, "price_hour": 0.05}
 }
 
+# Region price multipliers (relative to US base)
+REGION_PRICE_MULTIPLIERS = {
+    "us-east-1": 1.0, "us-east-2": 0.99, "us-west-1": 1.1, "us-west-2": 0.99,
+    "eu-west-1": 1.2, "eu-central-1": 1.15, "eu-north-1": 1.08,
+    "ap-southeast-1": 1.15, "ap-southeast-2": 1.25, "ap-northeast-1": 1.3,
+    # GCP
+    "us-central1": 1.0, "europe-west1": 1.2, "asia-southeast1": 1.15,
+    # Azure
+    "eastus": 1.0, "westus": 1.1, "westeurope": 1.2, "eastasia": 1.3
+}
 
 def compute_cluster_cost(state: InfraState) -> Dict[str, Any]:
-    """
-    Compute cluster cost estimates and overcommit analysis.
-    
-    Returns cost summary with:
-    - total_estimated_cost_per_hour
-    - per_pod_costs
-    - overcommit_warnings
-    - capacity_analysis
-    """
     logger.info("Computing cluster costs...")
     
-    snapshot = state["cluster_snapshot"]
+    snapshot = state.get("cluster_snapshot",{})
     nodes = snapshot.get("nodes", [])
     pods = snapshot.get("pods", [])
     deployments = snapshot.get("deployments", [])
+    
+    # Detect cluster region from node labels
+    detected_region = _detect_region(nodes)
+    region_multiplier = REGION_PRICE_MULTIPLIERS.get(detected_region, 1.0)
     
     # Build node cost map
     node_costs = {}
@@ -62,11 +66,16 @@ def compute_cluster_cost(state: InfraState) -> Dict[str, Any]:
         provider = _detect_provider(instance_type)
         price_entry = _get_price_entry(provider, instance_type)
         
+        # Apply region multiplier
+        region_adjusted_price = price_entry["price_hour"] * region_multiplier
+        
         node_costs[node["name"]] = {
             "instance_type": instance_type,
             "cpu_millicores": cpu_millicores,
             "memory_mib": mem_mib,
             "price_per_hour": price_entry["price_hour"],
+            "region_adjusted_price_per_hour": region_adjusted_price,
+            "region": detected_region,
             "vcpu": price_entry["vcpu"],
             "ram_gb": price_entry["ram_gb"]
         }
@@ -167,10 +176,12 @@ def compute_cluster_cost(state: InfraState) -> Dict[str, Any]:
             "message": f"Low memory utilization: {mem_utilization:.1f}% - cluster may be over-provisioned"
         })
     
-    # Total cluster cost
-    total_cluster_cost = sum(node["price_per_hour"] for node in node_costs.values())
+    # Total cluster cost (using region-adjusted prices)
+    total_cluster_cost = sum(node.get("region_adjusted_price_per_hour", node["price_per_hour"]) for node in node_costs.values())
     
     cost_summary = {
+        "detected_region": detected_region,
+        "region_price_multiplier": round(region_multiplier, 2),
         "total_estimated_cost_per_hour": round(total_cluster_cost, 4),
         "total_estimated_cost_per_month": round(total_cluster_cost * 730, 2),  # 730 = avg hours/month
         "node_count": len(nodes),
@@ -187,11 +198,10 @@ def compute_cluster_cost(state: InfraState) -> Dict[str, Any]:
         "top_expensive_pods": sorted(pod_costs, key=lambda x: x["estimated_cost_per_hour"], reverse=True)[:10]
     }
     
-    logger.info(f"Cost analysis: ${cost_summary['total_estimated_cost_per_hour']:.4f}/hr, "
+    logger.info(f"Cost analysis ({detected_region}): ${cost_summary['total_estimated_cost_per_hour']:.4f}/hr, "
                 f"CPU util: {cpu_utilization:.1f}%, Mem util: {mem_utilization:.1f}%")
     
     return cost_summary
-
 
 def _detect_provider(instance_type: str) -> str:
     """Detect cloud provider from instance type naming convention."""
@@ -214,6 +224,34 @@ def _detect_provider(instance_type: str) -> str:
     
     return "default"
 
+def _detect_region(nodes: list) -> str:
+    """Detect cluster region from node labels (topology.kubernetes.io/region)."""
+    if not nodes:
+        return "us-east-1"  # Default fallback
+    
+    # Check first node's topology labels
+    for node in nodes:
+        labels = node.get("labels", {})
+        
+        # Kubernetes standard region label
+        if "topology.kubernetes.io/region" in labels:
+            return labels["topology.kubernetes.io/region"]
+        
+        # AWS-specific region label
+        if "topology.aws.com/region" in labels:
+            return labels["topology.aws.com/region"]
+        
+        # GCP-specific region label
+        if "topology.gke.io/zone" in labels:
+            zone = labels["topology.gke.io/zone"]
+            # Convert zone (us-central1-a) to region (us-central1)
+            return zone.rsplit("-", 1)[0]
+        
+        # Azure-specific region label
+        if "topology.azure.com/region" in labels:
+            return labels["topology.azure.com/region"]
+    
+    return "us-east-1"  # Default fallback
 
 def _get_price_entry(provider: str, instance_type: str) -> Dict[str, Any]:
     """Get price entry for instance type."""

@@ -1,4 +1,3 @@
-"""Cluster snapshot node - deterministic Kubernetes state extraction."""
 import logging
 from typing import Dict, Any, List
 from kubernetes import client, config
@@ -7,7 +6,6 @@ from kubernetes.client.rest import ApiException
 from .models import InfraState, MAX_PODS, MAX_DEPLOYMENTS, MAX_SERVICES, MAX_NODES
 
 logger = logging.getLogger(__name__)
-
 
 def scan_cluster(state: InfraState) -> InfraState:
     """Scan Kubernetes cluster and extract bounded state."""
@@ -46,6 +44,7 @@ def scan_cluster(state: InfraState) -> InfraState:
     services = _extract_services(services_raw.items[:MAX_SERVICES])
     
     # Fetch ReplicaSets for ownership resolution
+    replicasets = []
     try:
         if target_namespace:
             replicasets_raw = apps_v1.list_namespaced_replica_set(namespace=target_namespace, limit=MAX_DEPLOYMENTS * 2)
@@ -54,12 +53,40 @@ def scan_cluster(state: InfraState) -> InfraState:
         replicasets = _extract_replicasets(replicasets_raw.items[:MAX_DEPLOYMENTS * 2])
     except ApiException as e:
         logger.warning(f"Failed to fetch ReplicaSets: {e}")
-        replicasets = []
     
-    logger.info(f"Scan complete: {len(nodes)} nodes, {len(deployments)} deployments, {len(pods)} pods, {len(services)} services, {len(replicasets)} replicasets")
-    state["cluster_snapshot"] = {"nodes": nodes, "deployments": deployments, "pods": pods, "services": services, "replicasets": replicasets}
+    # Fetch StatefulSets
+    statefulsets = []
+    try:
+        if target_namespace:
+            statefulsets_raw = apps_v1.list_namespaced_stateful_set(namespace=target_namespace, limit=MAX_DEPLOYMENTS)
+        else:
+            statefulsets_raw = apps_v1.list_stateful_set_for_all_namespaces(limit=MAX_DEPLOYMENTS)
+        statefulsets = _extract_statefulsets(statefulsets_raw.items[:MAX_DEPLOYMENTS])
+    except ApiException as e:
+        logger.warning(f"Failed to fetch StatefulSets: {e}")
+    
+    # Fetch DaemonSets
+    daemonsets = []
+    try:
+        if target_namespace:
+            daemonsets_raw = apps_v1.list_namespaced_daemon_set(namespace=target_namespace, limit=MAX_DEPLOYMENTS)
+        else:
+            daemonsets_raw = apps_v1.list_daemon_set_for_all_namespaces(limit=MAX_DEPLOYMENTS)
+        daemonsets = _extract_daemonsets(daemonsets_raw.items[:MAX_DEPLOYMENTS])
+    except ApiException as e:
+        logger.warning(f"Failed to fetch DaemonSets: {e}")
+    
+    logger.info(f"Scan complete: {len(nodes)} nodes, {len(deployments)} deps, {len(statefulsets)} sts, {len(daemonsets)} ds, {len(pods)} pods, {len(services)} svcs, {len(replicasets)} rs")
+    state["cluster_snapshot"] = {
+        "nodes": nodes,
+        "deployments": deployments,
+        "statefulsets": statefulsets,
+        "daemonsets": daemonsets,
+        "pods": pods,
+        "services": services,
+        "replicasets": replicasets
+    }
     return state
-
 
 def _extract_nodes(nodes: List[Any]) -> List[Dict[str, Any]]:
     """Extract node information with allocatable resources and instance metadata."""
@@ -70,6 +97,15 @@ def _extract_nodes(nodes: List[Any]) -> List[Dict[str, Any]]:
         # Normalize allocatable resources
         cpu_millicores = _parse_cpu_to_millicores(allocatable.get("cpu", "0"))
         memory_mib = _parse_memory_to_mib(allocatable.get("memory", "0"))
+        
+        # Extract node conditions for pressure detection
+        conditions = {}
+        if node.status.conditions:
+            for condition in node.status.conditions:
+                condition_type = condition.type
+                condition_status = condition.status  # "True" or "False"
+                conditions[condition_type] = (condition_status == "True")
+        
         result.append({
             "name": node.metadata.name,
             "allocatable_cpu": allocatable.get("cpu", "unknown"),
@@ -77,10 +113,10 @@ def _extract_nodes(nodes: List[Any]) -> List[Dict[str, Any]]:
             "allocatable_cpu_millicores": cpu_millicores,
             "allocatable_memory_mib": memory_mib,
             "instance_type": labels.get("node.kubernetes.io/instance-type", labels.get("beta.kubernetes.io/instance-type", "unknown")),
-            "labels": labels
+            "labels": labels,
+            "conditions": conditions
         })
     return result
-
 
 def _extract_deployments(deployments: List[Any]) -> List[Dict[str, Any]]:
     """Extract deployment information with labels and normalized resources."""
@@ -124,7 +160,6 @@ def _extract_deployments(deployments: List[Any]) -> List[Dict[str, Any]]:
         })
     return result
 
-
 def _extract_pods(pods: List[Any]) -> List[Dict[str, Any]]:
     """Extract pod information with labels, ownerReferences, and status."""
     result = []
@@ -167,11 +202,9 @@ def _extract_pods(pods: List[Any]) -> List[Dict[str, Any]]:
         })
     return result
 
-
 def _extract_services(services: List[Any]) -> List[Dict[str, Any]]:
     """Extract service information with selector details."""
     return [{"name": svc.metadata.name, "namespace": svc.metadata.namespace, "type": svc.spec.type, "selector": dict(svc.spec.selector) if svc.spec.selector else {}} for svc in services]
-
 
 def _extract_replicasets(replicasets: List[Any]) -> List[Dict[str, Any]]:
     """Extract ReplicaSet information with ownerReferences."""
@@ -194,6 +227,91 @@ def _extract_replicasets(replicasets: List[Any]) -> List[Dict[str, Any]]:
         })
     return result
 
+def _extract_statefulsets(statefulsets: List[Any]) -> List[Dict[str, Any]]:
+    """Extract StatefulSet information (ordered, persistent identity)."""
+    result = []
+    for sts in statefulsets:
+        replicas = sts.spec.replicas if sts.spec.replicas is not None else 1
+        labels = dict(sts.metadata.labels) if sts.metadata.labels else {}
+        pod_labels = dict(sts.spec.template.metadata.labels) if sts.spec.template.metadata.labels else {}
+        selector = sts.spec.selector.match_labels if sts.spec.selector and sts.spec.selector.match_labels else {}
+        containers = []
+        for container in (sts.spec.template.spec.containers or []):
+            privileged = container.security_context.privileged or False if container.security_context else False
+            requests, limits = {}, {}
+            if container.resources:
+                requests = dict(container.resources.requests) if container.resources.requests else {}
+                limits = dict(container.resources.limits) if container.resources.limits else {}
+            cpu_req_millicores = _parse_cpu_to_millicores(requests.get("cpu", "0"))
+            mem_req_mib = _parse_memory_to_mib(requests.get("memory", "0"))
+            cpu_lim_millicores = _parse_cpu_to_millicores(limits.get("cpu", "0"))
+            mem_lim_mib = _parse_memory_to_mib(limits.get("memory", "0"))
+            containers.append({
+                "name": container.name,
+                "image": container.image,
+                "privileged": privileged,
+                "requests": requests,
+                "limits": limits,
+                "requests_cpu_millicores": cpu_req_millicores,
+                "requests_memory_mib": mem_req_mib,
+                "limits_cpu_millicores": cpu_lim_millicores,
+                "limits_memory_mib": mem_lim_mib
+            })
+        result.append({
+            "name": sts.metadata.name,
+            "namespace": sts.metadata.namespace,
+            "uid": sts.metadata.uid,
+            "replicas": replicas,
+            "labels": labels,
+            "pod_labels": pod_labels,
+            "selector": selector,
+            "containers": containers,
+            "service_name": sts.spec.service_name or None,
+            "controller_type": "StatefulSet"
+        })
+    return result
+
+def _extract_daemonsets(daemonsets: List[Any]) -> List[Dict[str, Any]]:
+    """Extract DaemonSet information (one pod per node)."""
+    result = []
+    for ds in daemonsets:
+        labels = dict(ds.metadata.labels) if ds.metadata.labels else {}
+        pod_labels = dict(ds.spec.template.metadata.labels) if ds.spec.template.metadata.labels else {}
+        selector = ds.spec.selector.match_labels if ds.spec.selector and ds.spec.selector.match_labels else {}
+        containers = []
+        for container in (ds.spec.template.spec.containers or []):
+            privileged = container.security_context.privileged or False if container.security_context else False
+            requests, limits = {}, {}
+            if container.resources:
+                requests = dict(container.resources.requests) if container.resources.requests else {}
+                limits = dict(container.resources.limits) if container.resources.limits else {}
+            cpu_req_millicores = _parse_cpu_to_millicores(requests.get("cpu", "0"))
+            mem_req_mib = _parse_memory_to_mib(requests.get("memory", "0"))
+            cpu_lim_millicores = _parse_cpu_to_millicores(limits.get("cpu", "0"))
+            mem_lim_mib = _parse_memory_to_mib(limits.get("memory", "0"))
+            containers.append({
+                "name": container.name,
+                "image": container.image,
+                "privileged": privileged,
+                "requests": requests,
+                "limits": limits,
+                "requests_cpu_millicores": cpu_req_millicores,
+                "requests_memory_mib": mem_req_mib,
+                "limits_cpu_millicores": cpu_lim_millicores,
+                "limits_memory_mib": mem_lim_mib
+            })
+        result.append({
+            "name": ds.metadata.name,
+            "namespace": ds.metadata.namespace,
+            "uid": ds.metadata.uid,
+            "labels": labels,
+            "pod_labels": pod_labels,
+            "selector": selector,
+            "containers": containers,
+            "update_strategy": ds.spec.update_strategy.type if ds.spec.update_strategy else None,
+            "controller_type": "DaemonSet"
+        })
+    return result
 
 def _parse_cpu_to_millicores(cpu_str: str) -> int:
     """Parse Kubernetes CPU string to millicores."""
@@ -206,7 +324,6 @@ def _parse_cpu_to_millicores(cpu_str: str) -> int:
         return int(float(cpu_str) * 1000)
     except (ValueError, TypeError):
         return 0
-
 
 def _parse_memory_to_mib(mem_str: str) -> int:
     """Parse Kubernetes memory string to MiB."""

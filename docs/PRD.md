@@ -5,7 +5,18 @@
 # KubeSentinel — DeepAgent Kubernetes Intelligence Engine (MVP)
 
 ---
-
+flowchart LR
+    A[Cluster Scan] --> B[Heuristic Graph Builder]
+    B --> C[Signal Generator]
+    C --> D[Risk Scorer]
+    D --> E[Planner Agent]
+    E --> F[Failure Agent]
+    E --> G[Cost Agent]
+    E --> H[Security Agent]
+    F --> I[Synthesizer]
+    G --> I
+    H --> I
+    I --> J[Markdown Report]
 # 1. PRODUCT DEFINITION
 
 ## 1.1 Product Category
