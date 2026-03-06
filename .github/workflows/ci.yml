@@ -22,7 +22,7 @@ jobs:
             enable-cache: true
 
       - name: Sync dependencies
-        run: uv sync --all-groups
+        run: uv sync --all-extras
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -49,7 +49,7 @@ jobs:
         
 
       - name: Sync dependencies
-        run: uv sync --all-groups
+        run: uv sync --all-extras
 
       - name: Run tests
         run: uv run pytest -v
@@ -66,7 +66,7 @@ jobs:
         with:
             enable-cache: true
 
-      - run: uv sync --all-groups
+      - run: uv sync --all-extras
 
       - name: Run architecture validation
         run: |
@@ -84,7 +84,7 @@ jobs:
         with:
             enable-cache: true
 
-      - run: uv sync --all-groups
+      - run: uv sync --all-extras
 
       - name: Build wheel
         run: uv build
@@ -104,7 +104,7 @@ jobs:
       - uses: astral-sh/setup-uv@v1
         with:
             enable-cache: true
-      - run: uv sync --all-groups
+      - run: uv sync --all-extras
 
       - name: Run CLI scan
         run: |
