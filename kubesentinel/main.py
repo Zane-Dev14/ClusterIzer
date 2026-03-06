@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import sys
 from typing import Optional
@@ -12,6 +13,9 @@ from rich.table import Table
 from .runtime import run_engine
 from .reporting import build_report
 from .models import InfraState
+from .cluster import scan_cluster
+from .graph_builder import build_graph
+from .simulation import simulate_node_failure
 
 # Configure logging
 logging.basicConfig(
@@ -20,6 +24,11 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Silence noisy kubernetes client debug logs that flood terminals
+# Keep global logging as configured, but raise the level for Kubernetes internals
+for _name in ("kubernetes.client.rest", "kubernetes.client", "kubernetes", "urllib3"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 app = typer.Typer(name="kubesentinel", help="KubeSentinel - Kubernetes Intelligence Engine", add_completion=False)
 
@@ -46,6 +55,11 @@ def scan(
         "-n",
         help="Kubernetes namespace to scan (default: all namespaces)"
     ),
+    agents: Optional[str] = typer.Option(
+        None,
+        "--agents",
+        help="Override planner: comma-separated list of agents (failure,cost,security)"
+    ),
     ci_mode: bool = typer.Option(
         False,
         "--ci",
@@ -59,6 +73,8 @@ def scan(
 ):
     if verbose and not json_output:
         logging.getLogger().setLevel(logging.DEBUG)
+        # Enable verbose agent logging
+        os.environ["KUBESENTINEL_VERBOSE_AGENTS"] = "1"
         logger.debug("Verbose logging enabled")
     elif json_output:
         logging.getLogger().setLevel(logging.ERROR)
@@ -71,7 +87,19 @@ def scan(
     try:
         if not json_output:
             console.print("\n🔍 [bold]Scanning cluster...[/bold]")
-        state = run_engine(query, namespace=namespace)
+        
+        # Parse agents override
+        agents_list = None
+        if agents:
+            agents_list = [a.strip() for a in agents.split(",")]
+            # Validate agents
+            valid_agents = {"failure_agent", "cost_agent", "security_agent"}
+            agents_list = [a for a in agents_list if a in valid_agents]
+            if not agents_list:
+                console.print("[yellow]Warning: No valid agents specified. Using planner.[/yellow]")
+                agents_list = None
+        
+        state = run_engine(query, namespace=namespace, agents=agents_list)
         
         if not json_output:
             console.print("📝 [bold]Generating report...[/bold]")
@@ -160,6 +188,167 @@ def version():
     """Show version information."""
     from . import __version__
     console.print(f"KubeSentinel version [cyan]{__version__}[/cyan]")
+
+@app.command()
+def simulate(
+    action: str = typer.Argument(..., help="Simulation action (node-failure)"),
+    node: Optional[str] = typer.Option(None, "--node", help="Node name to simulate failure for"),
+    json_output: bool = typer.Option(False, "--json", help="Output results as JSON")
+):
+    """Simulate infrastructure failure scenarios."""
+    
+    if action != "node-failure":
+        console.print(f"[red]Error:[/red] Unknown simulation action '{action}'. Available: node-failure", err=True)
+        sys.exit(1)
+    
+    if not node:
+        console.print("[red]Error:[/red] --node is required for node-failure simulation", err=True)
+        sys.exit(1)
+    
+    # Suppress logging for JSON output
+    if json_output:
+        logging.getLogger().setLevel(logging.ERROR)
+    
+    try:
+        if not json_output:
+            console.print(Panel.fit(
+                f"[bold cyan]Node Failure Simulation[/bold cyan]\\nTarget: [yellow]{node}[/yellow]",
+                border_style="cyan"
+            ))
+            console.print("\\n🔍 [bold]Scanning cluster...[/bold]")
+        
+        # Scan cluster and build graph
+        state: InfraState = {
+            "user_query": "simulation",
+            "cluster_snapshot": {},
+            "graph_summary": {},
+            "signals": [],
+            "risk_score": {},
+            "planner_decision": [],
+            "failure_findings": [],
+            "cost_findings": [],
+            "security_findings": [],
+            "strategic_summary": "",
+            "final_report": ""
+        }
+        
+        state = scan_cluster(state)
+        state = build_graph(state)
+        
+        if not json_output:
+            console.print("🧪 [bold]Simulating node failure...[/bold]\\n")
+        
+        # Run simulation
+        result = simulate_node_failure(
+            state["cluster_snapshot"],
+            state["graph_summary"],
+            node
+        )
+        
+        # Check for errors
+        if "error" in result:
+            if json_output:
+                print(json.dumps(result, indent=2))
+            else:
+                console.print(f"[red]Error:[/red] {result['error']}")
+                if "available_nodes" in result:
+                    console.print("\\n[yellow]Available nodes:[/yellow]")
+                    for n in result["available_nodes"]:
+                        console.print(f"  • {n}")
+            sys.exit(1)
+        
+        # Display results
+        if json_output:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            _display_simulation_results(result)
+        
+        # Exit with appropriate code based on severity
+        exit_code = 0 if result.get("impact_severity") in ["low", "medium"] else 1
+        sys.exit(exit_code)
+        
+    except Exception as e:
+        if json_output:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            console.print(f"\\n❌ [bold red]Error:[/bold red] {e}\\n", style="red")
+        logger.error(f"Simulation error: {e}", exc_info=True)
+        sys.exit(1)
+
+
+def _display_simulation_results(result: dict) -> None:
+    """Display simulation results in rich format."""
+    node = result.get("node")
+    severity = result.get("impact_severity", "unknown")
+    summary = result.get("summary", "")
+    
+    # Severity styling
+    severity_color = {
+        "critical": "red",
+        "high": "orange",
+        "medium": "yellow",
+        "low": "green",
+        "none": "blue"
+    }.get(severity, "white")
+    
+    console.print(f"[bold]Impact Severity:[/bold] [{severity_color}]{severity.upper()}[/{severity_color}]\\n")
+    console.print(f"[dim]{summary}[/dim]\\n")
+    
+    # Affected pods
+    pods = result.get("affected_pods", [])
+    if pods:
+        console.print(f"[bold cyan]Affected Pods ({len(pods)}):[/bold cyan]")
+        for pod in pods[:10]:  # Limit display
+            console.print(f"  • {pod.get('namespace')}/{pod.get('name')}")
+        if len(pods) > 10:
+            console.print(f"  [dim]... and {len(pods) - 10} more[/dim]")
+        console.print()
+    
+    # Affected workloads
+    workloads = result.get("affected_workloads", [])
+    if workloads:
+        table = Table(title="Affected Workloads", show_header=True, header_style="bold magenta")
+        table.add_column("Type", style="cyan")
+        table.add_column("Name", style="white")
+        table.add_column("Namespace", style="dim")
+        table.add_column("Replicas", justify="right", style="yellow")
+        table.add_column("Impact", style="white")
+        
+        for wl in workloads:
+            impact = wl.get("impact", "unknown")
+            impact_style = {
+                "critical": "bold red",
+                "high": "bold orange",
+                "medium": "yellow",
+                "low": "green"
+            }.get(impact, "white")
+            
+            table.add_row(
+                wl.get("type", "Unknown"),
+                wl.get("name", "unknown"),
+                wl.get("namespace", "default"),
+                str(wl.get("replicas", "?")),
+                f"[{impact_style}]{impact.upper()}[/{impact_style}]"
+            )
+        
+        console.print(table)
+        console.print()
+    
+    # Affected services
+    services = result.get("affected_services", [])
+    if services:
+        console.print(f"[bold cyan]Affected Services ({len(services)}):[/bold cyan]")
+        for svc in services:
+            console.print(f"  • {svc.get('namespace')}/{svc.get('name')} → {svc.get('backend')}")
+        console.print()
+    
+    # Recommendations
+    recommendations = result.get("recommendations", [])
+    if recommendations:
+        console.print("[bold green]Recommendations:[/bold green]")
+        for rec in recommendations:
+            console.print(f"  {rec}")
+        console.print()
 
 if __name__ == "__main__":
     app()

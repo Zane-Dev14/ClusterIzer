@@ -208,7 +208,7 @@ def _generate_namespace_signals(snapshot: Dict[str, Any], seen: Set, signals: Li
         ns_pods = [p for p in snapshot.get("pods", []) if p.get("namespace") == ns]
         if len(ns_pods) == 0:
             _add_signal(signals, seen, "cost", "low", resource,
-                       f"Empty namespace (no active pods)",
+                       "Empty namespace (no active pods)",
                        signal_id="empty_namespace")
 
 def _generate_node_signals(snapshot: Dict[str, Any], seen: Set, signals: List) -> None:
@@ -281,5 +281,5 @@ def _generate_orphan_workload_signals(snapshot: Dict[str, Any], graph_summary: D
         if not owner_refs and pod_key not in ownership_index:
             resource = f"pod/{pod['namespace']}/{pod['name']}"
             _add_signal(signals, seen, "reliability", "medium", resource,
-                       f"Orphaned pod with no controller - will not be recreated if deleted",
+                       "Orphaned pod with no controller - will not be recreated if deleted",
                        signal_id="orphaned_pod")

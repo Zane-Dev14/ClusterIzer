@@ -4,6 +4,7 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 from .models import InfraState, MAX_PODS, MAX_DEPLOYMENTS, MAX_SERVICES, MAX_NODES
+from .crd_discovery import discover_crds
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,18 @@ def scan_cluster(state: InfraState) -> InfraState:
     except ApiException as e:
         logger.warning(f"Failed to fetch DaemonSets: {e}")
     
-    logger.info(f"Scan complete: {len(nodes)} nodes, {len(deployments)} deps, {len(statefulsets)} sts, {len(daemonsets)} ds, {len(pods)} pods, {len(services)} svcs, {len(replicasets)} rs")
+    # Discover Custom Resources (CRDs)
+    crds = {}
+    crd_errors = []
+    try:
+        crds, crd_errors = discover_crds(target_namespace)
+        if crd_errors:
+            for error in crd_errors:
+                logger.debug(f"CRD discovery warning: {error}")
+    except Exception as e:
+        logger.warning(f"CRD discovery failed: {e}")
+    
+    logger.info(f"Scan complete: {len(nodes)} nodes, {len(deployments)} deps, {len(statefulsets)} sts, {len(daemonsets)} ds, {len(pods)} pods, {len(services)} svcs, {len(replicasets)} rs, {len(crds)} CRD groups")
     state["cluster_snapshot"] = {
         "nodes": nodes,
         "deployments": deployments,
@@ -84,7 +96,8 @@ def scan_cluster(state: InfraState) -> InfraState:
         "daemonsets": daemonsets,
         "pods": pods,
         "services": services,
-        "replicasets": replicasets
+        "replicasets": replicasets,
+        "crds": crds
     }
     return state
 

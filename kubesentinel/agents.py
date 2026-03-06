@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import re
 from pathlib import Path
 from typing import List, Dict, Any
 from functools import wraps
@@ -22,12 +24,22 @@ LLM = ChatOllama(
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 
-# Agent timeout enforcement (30 seconds per agent)
+# Agent configuration constants
 AGENT_TIMEOUT_SECONDS = 60
+AGENT_MAX_ITERATIONS = 8
+AGENT_TOOL_SIGNAL_LIMIT = 30
+VERBOSE = os.getenv("KUBESENTINEL_VERBOSE_AGENTS") == "1"
 
 class AgentTimeoutError(Exception):
     """Raised when agent exceeds timeout."""
     pass
+
+def _sanitize_for_json(text: str) -> str:
+    """Remove control characters from text for JSON safety."""
+    if not isinstance(text, str):
+        return str(text)
+    # Remove control chars (ord < 32) except \n, \r, \t
+    return ''.join(c if ord(c) >= 32 or c in '\n\r\t' else ' ' for c in text)
 
 def with_timeout(seconds: int):
     """Decorator to enforce timeout in a thread-safe way."""
@@ -101,21 +113,52 @@ def planner_node(state: InfraState) -> InfraState:
     """Deterministic planner that decides which agents to run based on query keywords."""
     logger.info("Planning agent execution...")
     
+    # Check for CLI override first
+    if state.get("planner_decision"):
+        logger.info(f"Planner using CLI override: {state.get('planner_decision')}")
+        return state
+    
     query = state.get("user_query", "").lower()
     
-    # Deterministic keyword matching
+    # Extract tokens (words >= 3 chars)
+    tokens = set(re.findall(r'\b[a-z]{3,}\b', query))
+    if VERBOSE:
+        logger.debug(f"Planner tokens: {tokens}")
+    
     agents = []
     
-    if "cost" in query:
+    # Architecture queries explicitly request all agents
+    architecture_keywords = {"full", "all", "complete", "architecture", "deep", "comprehensive"}
+    if any(w in tokens for w in architecture_keywords):
+        agents = ["failure_agent", "cost_agent", "security_agent"]
+        logger.info(f"Planner selected agents: {agents} (architecture query)")
+        state["planner_decision"] = agents
+        return state
+    
+    # Cost routing
+    cost_keywords = {"cost", "costs", "spend", "spending", "bill", "billing", "price", "pricing", 
+                     "budget", "optimization", "optimize", "reduce", "save", "saving", "savings", "waste"}
+    if any(w in tokens for w in cost_keywords):
         agents.append("cost_agent")
-    if "security" in query or "secure" in query:
+    
+    # Security routing
+    if any(w in tokens for w in ("security", "secure", "vuln", "cve", "cis", "privilege", "audit")):
         agents.append("security_agent")
-    if "reliability" in query or "failure" in query or "fail" in query:
+    
+    # Reliability routing
+    reliability_keywords = {"reliability", "failure", "fail", "outage", "replica", "redundancy", "health", "pressure"}
+    if any(w in tokens for w in reliability_keywords):
         agents.append("failure_agent")
     
-    # Default to all agents for full analysis
-    if not agents or "full" in query or "all" in query or "complete" in query:
-        agents = ["failure_agent", "cost_agent", "security_agent"]
+    # Node-related queries also trigger failure agent (node pressure)
+    if any(w in tokens for w in ("node", "memory", "disk", "pressure", "capacity")):
+        if "failure_agent" not in agents:
+            agents.append("failure_agent")
+    
+    # If no specific routing matched, default to failure_agent for generic queries
+    if not agents:
+        logger.warning(f"No specific agent routing for query: '{query}' - defaulting to failure_agent")
+        agents = ["failure_agent"]
     
     # Deduplicate while preserving order
     seen = set()
@@ -260,25 +303,73 @@ def _deterministic_cost_check(state: InfraState) -> List[Dict[str, Any]]:
     """Deterministic cost check (rules-based, no LLM)."""
     findings = []
     signals = state.get("signals", [])
+    graph = state.get("graph_summary", {})
+    snapshot = state.get("cluster_snapshot", {})
     
-    # Rule: Over-provisioned clusters
-    over_prov = [s for s in signals if "over-provisioned" in s.get("message", "").lower()]
-    if over_prov:
+    # Rule 1: Single replica deployments → cost inefficiency
+    single_replicas = graph.get("single_replica_deployments", [])
+    if single_replicas and len(single_replicas) > 3:
         findings.append({
-            "resource": "cluster/sizing",
+            "resource": "cluster/deployments",
             "severity": "medium",
-            "analysis": "Cluster appears to be over-provisioned with low utilization",
-            "recommendation": "Right-size nodes or consolidate workloads to reduce costs"
+            "analysis": f"{len(single_replicas)} deployments run with single replica (inefficient resource usage)",
+            "recommendation": "Consolidate single-replica workloads or enable horizontal pod autoscaling to improve node utilization"
         })
     
-    # Rule: High replica count
-    high_replicas = [s for s in signals if "replicas" in s.get("message", "").lower() and "may be over-provisioned" in s.get("message", "")]
-    if high_replicas:
+    # Rule 2: Nodes under 30% utilization → cost waste
+    nodes = snapshot.get("nodes", [])
+    pods = snapshot.get("pods", [])
+    underutilized_nodes = []
+    for node in nodes:
+        node_name = node.get("name")
+        node_pods = [p for p in pods if p.get("node_name") == node_name]
+        
+        # Estimate utilization from requested resources
+        node_cpu_str = node.get("cpu", "0")
+        node_cpu = float(node_cpu_str.rstrip("m")) if "m" in node_cpu_str else float(node_cpu_str) * 1000
+        
+        total_requested_cpu = 0
+        for pod in node_pods:
+            for container in pod.get("containers", []):
+                cpu_req = container.get("resources", {}).get("requests", {}).get("cpu", "0")
+                if cpu_req:
+                    cpu_val = float(cpu_req.rstrip("m")) if "m" in cpu_req else float(cpu_req) * 1000
+                    total_requested_cpu += cpu_val
+        
+        if node_cpu > 0:
+            utilization = (total_requested_cpu / node_cpu) * 100
+            if utilization < 30 and len(node_pods) > 0:  # Only flag if node has workloads
+                underutilized_nodes.append({"name": node_name, "utilization": utilization})
+    
+    if underutilized_nodes:
         findings.append({
-            "resource": "cluster/workload",
+            "resource": "cluster/nodes",
+            "severity": "high",
+            "analysis": f"{len(underutilized_nodes)} nodes are under 30% CPU utilization (wasted capacity)",
+            "recommendation": "Consider draining and removing underutilized nodes, or consolidating workloads to fewer nodes"
+        })
+    
+    # Rule 3: Workloads without HPA → scaling inefficiency
+    deployments = snapshot.get("deployments", [])
+    # Note: HPA detection requires HPA resources in cluster scan (future enhancement)
+    # For now, detect fixed replica counts > 1 as potential HPA candidates
+    hpa_candidates = [d for d in deployments if d.get("replicas", 0) > 1 and d.get("replicas", 0) < 10]
+    if len(hpa_candidates) > 5:
+        findings.append({
+            "resource": "cluster/autoscaling",
             "severity": "low",
-            "analysis": f"{len(high_replicas)} deployments may be over-replicated",
-            "recommendation": "Review replica counts for cost optimization"
+            "analysis": f"{len(hpa_candidates)} deployments with fixed replica counts could benefit from autoscaling",
+            "recommendation": "Enable HorizontalPodAutoscaler (HPA) for workloads with variable load patterns"
+        })
+    
+    # Rule 4: Over-requested CPU (detected via signals)
+    over_requested = [s for s in signals if "over-requested" in s.get("message", "").lower() or "over-provisioned" in s.get("message", "").lower()]
+    if over_requested:
+        findings.append({
+            "resource": "cluster/resources",
+            "severity": "medium",
+            "analysis": f"{len(over_requested)} containers have resource requests significantly exceeding usage",
+            "recommendation": "Right-size CPU/memory requests based on actual usage patterns (use VPA or monitoring data)"
         })
     
     return findings
@@ -321,38 +412,110 @@ def _deterministic_security_check(state: InfraState) -> List[Dict[str, Any]]:
     return findings
 
 def _run_agent(state: InfraState, agent_name: str, prompt_file: str, category: str) -> List[Dict[str, Any]]:
-    """Run agent with tools and parse JSON findings."""
+    """Run agent with tools and parse JSON findings.
+    
+    Uses max_iterations to prevent infinite loops and sends compact prompt to reduce tokens.
+    """
     system_prompt = (PROMPT_DIR / prompt_file).read_text()
     
     tools = make_tools(state)
-    agent = create_agent(LLM, tools, system_prompt=system_prompt)
+    agent = create_agent(
+        LLM,
+        tools,
+        system_prompt=system_prompt
+    )
+    
     signals = state.get("signals", [])
     category_signals = [s for s in signals if s.get("category") == category]
-    human_msg = f"""Analyze the {category} signals and provide findings.
-Signal count: {len(category_signals)}
-Use tools: get_signals(category="{category}"), get_graph_summary(), get_cluster_summary(), get_risk_score()
-Return findings as JSON array per your instructions."""
+    
+    # Create compact context (don't send full signals)
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for s in category_signals:
+        severity_counts[s.get("severity", "low")] += 1
+    
+    risk_score = state.get("risk_score", {})
+    graph = state.get("graph_summary", {})
+    logger.debug(f"Graph Summary: {graph}")
+    
+    # Compact prompt that directs agent to use tools
+    human_msg = (
+        f"Analyze {len(category_signals)} {category} signals and provide findings.\n"
+        f"Severity breakdown: {severity_counts['critical']} critical, {severity_counts['high']} high, "
+        f"{severity_counts['medium']} medium, {severity_counts['low']} low.\n"
+        f"Risk score: {risk_score.get('score', 0)}/100 grade {risk_score.get('grade', 'N/A')}. "
+        f"Use tools (get_signals, get_cluster_summary, get_graph_summary) to fetch details. "
+        f"Return valid JSON array with format: [{{'resource': '...', 'severity': '...', 'analysis': '...', 'recommendation': '...'}}]"
+    )
+    
+    if VERBOSE:
+        logger.debug(f"Running {agent_name} agent, prompt_size={len(human_msg)} chars")
+    
     result = agent.invoke({"messages": [HumanMessage(content=human_msg)]})
     findings = _extract_json_findings(result)
-    logger.info(f"{agent_name} produced {len(findings)} findings")
+    
+    if VERBOSE:
+        logger.debug(f"{agent_name} returned {len(findings)} findings from {len(category_signals)} signals")
+    else:
+        logger.info(f"{agent_name} produced {len(findings)} findings")
+    
     return findings
 
 def _extract_json_findings(result: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    """Extract JSON findings array from agent messages."""
-    if not result or not (messages := result.get("messages", [])):
+    """Extract JSON findings array from agent output.
+    
+    Handles agent.invoke() result structure: {"output": "...JSON..."}
+    Also handles markdown-fenced JSON: `` `json` {...} ` ``
+    """
+    if not result:
         return []
-    last_msg = messages[-1]
-    content = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+    
+    # Agent.invoke() returns {"output": "..."} not {"messages": [...]} 
+    content = result.get("output", "")
+    if not content:
+        return []
+    
     content = str(content) if not isinstance(content, str) else content
+    
+    # Sanitize control characters
+    content = _sanitize_for_json(content)
+    
+    # Try to extract JSON - look for markdown fence first
+    if "```json" in content or "```" in content:
+        # Extract content between fences
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
+        if match:
+            content = match.group(1).strip()
+    
     try:
+        # Try direct JSON parse first
+        findings = json.loads(content)
+        if isinstance(findings, list):
+            # Validate structure
+            valid = [f for f in findings if isinstance(f, dict) and 
+                    all(k in f for k in ["resource", "severity", "analysis", "recommendation"])]
+            if valid and VERBOSE:
+                logger.debug(f"Extracted {len(valid)} findings from agent output")
+            return valid
+    except json.JSONDecodeError as e:
+        # Fallback: look for JSON array brackets
         start, end = content.find('['), content.rfind(']')
         if start != -1 and end != -1 and end > start:
-            findings = json.loads(content[start:end+1])
-            if isinstance(findings, list):
-                return [f for f in findings if isinstance(f, dict) and 
-                       all(k in f for k in ["resource", "severity", "analysis", "recommendation"])]
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse JSON: {e}")
+            try:
+                findings = json.loads(content[start:end+1])
+                if isinstance(findings, list):
+                    valid = [f for f in findings if isinstance(f, dict) and 
+                            all(k in f for k in ["resource", "severity", "analysis", "recommendation"])]
+                    if valid:
+                        if VERBOSE:
+                            logger.debug(f"Extracted {len(valid)} findings from bracketed JSON")
+                        return valid
+            except json.JSONDecodeError:
+                pass
+        
+        if VERBOSE:
+            logger.warning(f"Failed to parse JSON findings: {str(e)[:100]}")
+        logger.debug(f"Raw agent output (first 500 chars): {content[:500]}")
+    
     return []
 
 def synthesizer_node(state: InfraState) -> InfraState:

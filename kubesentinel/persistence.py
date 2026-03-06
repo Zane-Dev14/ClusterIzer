@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

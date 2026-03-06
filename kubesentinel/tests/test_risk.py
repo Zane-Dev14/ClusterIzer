@@ -34,7 +34,7 @@ def test_empty_signals_score_zero():
 
 
 def test_single_critical_signal():
-    """Test that one critical signal gives score 30 (15*2.0 security multiplier), grade B."""
+    """Test that one critical signal gives score 30 (15*2.0 security multiplier), grade A."""
     state: InfraState = {
         "user_query": "test",
         "cluster_snapshot": {},
@@ -61,7 +61,7 @@ def test_single_critical_signal():
     risk = result["risk_score"]
     
     assert risk["score"] == 30  # critical (15) * security multiplier (2.0)
-    assert risk["grade"] == "B"  # 30 is B grade threshold
+    assert risk["grade"] == "A"  # 30 is A grade threshold (0-34)
     assert risk["signal_count"] == 1
 
 
@@ -102,7 +102,7 @@ def test_score_capped_at_100():
 
 
 def test_grade_boundary_A_B():
-    """Test grade boundary between A (0-29) and B (30-49) with contextual weighting."""
+    """Test grade boundary between A (0-34) and B (35-54) with contextual weighting."""
     # A grade: 1 reliability critical = 15 * 1.8 = 27
     state_a: InfraState = {
         "user_query": "test",
@@ -125,14 +125,14 @@ def test_grade_boundary_A_B():
     assert result_a["risk_score"]["score"] == 27
     assert result_a["risk_score"]["grade"] == "A"
     
-    # B grade: 1 reliability critical (27) + 1 cost high (8*0.5=4) = 31
+    # B grade: 1 security critical (30) + 1 cost critical (15*0.5=7.5) = 37 (int)
     state_b: InfraState = {
         "user_query": "test",
         "cluster_snapshot": {},
         "graph_summary": {},
         "signals": [
-            {"category": "reliability", "severity": "critical", "resource": "test1", "message": "test"},
-            {"category": "cost", "severity": "high", "resource": "test2", "message": "test"},
+            {"category": "security", "severity": "critical", "resource": "test1", "message": "test"},
+            {"category": "cost", "severity": "critical", "resource": "test2", "message": "test"},
         ],
         "risk_score": {},
         "planner_decision": [],
@@ -145,12 +145,12 @@ def test_grade_boundary_A_B():
     
     result_b = compute_risk(state_b)
     assert "risk_score" in result_b
-    assert result_b["risk_score"]["score"] == 31  # 27 + 4
+    assert result_b["risk_score"]["score"] == 37
     assert result_b["risk_score"]["grade"] == "B"
 
 
 def test_grade_boundary_C_D():
-    """Test grade boundary between C (50-69) and D (70-89) with contextual weighting."""
+    """Test grade boundary between C (55-74) and D (75-89) with contextual weighting."""
     # C grade: 2 security critical = 2 * 15 * 2.0 = 60
     signals_c = [
         {"category": "security", "severity": "critical", "resource": "t1", "message": "t"},
@@ -176,8 +176,11 @@ def test_grade_boundary_C_D():
     assert result_c["risk_score"]["score"] == 60
     assert result_c["risk_score"]["grade"] == "C"
     
-    # D grade: 2 security critical (60) + 1 reliability high (14.4 -> 14) = 74
-    signals_d = signals_c + [{"category": "reliability", "severity": "high", "resource": "t3", "message": "t"}]
+    # D grade: 2 security critical (60) + 1 reliability high (14.4) + 1 cost high (4) = 78
+    signals_d = signals_c + [
+        {"category": "reliability", "severity": "high", "resource": "t3", "message": "t"},
+        {"category": "cost", "severity": "high", "resource": "t4", "message": "t"},
+    ]
     
     state_d: InfraState = {
         "user_query": "test",
@@ -195,7 +198,7 @@ def test_grade_boundary_C_D():
     
     result_d = compute_risk(state_d)
     assert "risk_score" in result_d
-    assert result_d["risk_score"]["score"] == 74
+    assert result_d["risk_score"]["score"] == 78
     assert result_d["risk_score"]["grade"] == "D"
 
 

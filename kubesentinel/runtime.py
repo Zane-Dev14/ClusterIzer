@@ -1,4 +1,5 @@
 import logging
+import copy
 from datetime import datetime
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -59,7 +60,10 @@ def persist_snapshot(state: InfraState) -> InfraState:
     return state
 
 def run_agents_parallel(state: InfraState) -> InfraState:
-    """Run selected agents concurrently and merge findings."""
+    """Run selected agents concurrently and merge findings.
+    
+    Uses deep copy to prevent race conditions when agents read/modify state.
+    """
     selected = set(state.get("planner_decision", []))
     agent_map = {
         "failure_agent": (failure_agent_node, "failure_findings"),
@@ -75,9 +79,10 @@ def run_agents_parallel(state: InfraState) -> InfraState:
         return state
 
     logger.info("Running selected agents concurrently...")
-    with ThreadPoolExecutor(max_workers=len(run_targets)) as pool:
+    max_workers = min(len(run_targets), 3)  # Limit to 3 parallel workers
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(func, dict(state)): (name, findings_key) #type: ignore
+            pool.submit(func, copy.deepcopy(state)): (name, findings_key)  # type: ignore
             for name, (func, findings_key) in run_targets.items()
         }
         for future in as_completed(futures):
@@ -85,8 +90,9 @@ def run_agents_parallel(state: InfraState) -> InfraState:
             try:
                 result_state = future.result()
                 state[findings_key] = result_state.get(findings_key, [])
+                logger.debug(f"Agent {name} completed: {len(state[findings_key])} findings")
             except Exception as exc:
-                logger.error(f"{name} failed in parallel execution: {exc}")
+                logger.error(f"{name} failed in parallel execution: {exc}", exc_info=True)
                 state[findings_key] = []
 
     return state
@@ -132,11 +138,19 @@ def get_graph():
         _graph = build_runtime_graph()
     return _graph
 
-def run_engine(user_query: str, namespace: str | None = None) -> InfraState:
-    """Run the complete KubeSentinel analysis engine."""
+def run_engine(user_query: str, namespace: str | None = None, agents: list[str] | None = None) -> InfraState:
+    """Run the complete KubeSentinel analysis engine.
+    
+    Args:
+        user_query: The analysis query
+        namespace: Optional Kubernetes namespace to scan
+        agents: Optional list of agent names to override planner decision
+    """
     logger.info(f"Starting engine: {user_query}")
     if namespace:
         logger.info(f"Namespace: {namespace}")
+    if agents:
+        logger.info(f"Agent override: {agents}")
     
     # Initialize state
     initial_state: InfraState = {
@@ -145,7 +159,7 @@ def run_engine(user_query: str, namespace: str | None = None) -> InfraState:
         "graph_summary": {},
         "signals": [],
         "risk_score": {},
-        "planner_decision": [],
+        "planner_decision": agents if agents else [],  # Override if provided
         "failure_findings": [],
         "cost_findings": [],
         "security_findings": [],

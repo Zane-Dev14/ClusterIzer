@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -9,8 +10,13 @@ logger = logging.getLogger(__name__)
 def build_report(state: InfraState) -> str:
     """Build comprehensive markdown report from state."""
     logger.info("Building markdown report...")
+    
+    # Generate UTC timestamp
+    report_timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    
     sections = []
     sections.append("# KubeSentinel Infrastructure Intelligence Report\n")
+    sections.append(f"**Report generated at:** {report_timestamp} (UTC)\n")
     sections.append(f"**Analysis Query:** {state.get('user_query')}\n")
     sections.append("---\n")
     sections.append(_build_architecture_section(state))
