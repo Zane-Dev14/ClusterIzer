@@ -22,15 +22,12 @@ def test_crashloop_signal_generated():
                     "phase": "Running",
                     "node_name": "node-1",
                     "crash_loop_backoff": True,
-                    "container_statuses": []
+                    "container_statuses": [],
                 }
             ],
-            "services": []
+            "services": [],
         },
-        "graph_summary": {
-            "orphan_services": [],
-            "single_replica_deployments": []
-        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
         "signals": [],
         "risk_score": {},
         "planner_decision": [],
@@ -38,16 +35,16 @@ def test_crashloop_signal_generated():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = generate_signals(state)
     assert "signals" in result
     signals = result["signals"]
-    
+
     # Should have at least one signal
     assert len(signals) > 0
-    
+
     # Should have CrashLoopBackOff signal
     crash_signals = [s for s in signals if "CrashLoopBackOff" in s["message"]]
     assert len(crash_signals) == 1
@@ -67,15 +64,15 @@ def test_single_replica_signal_generated():
                     "name": "single-dep",
                     "namespace": "default",
                     "replicas": 1,
-                    "containers": []
+                    "containers": [],
                 }
             ],
             "pods": [],
-            "services": []
+            "services": [],
         },
         "graph_summary": {
             "orphan_services": [],
-            "single_replica_deployments": ["single-dep"]
+            "single_replica_deployments": ["single-dep"],
         },
         "signals": [],
         "risk_score": {},
@@ -84,13 +81,13 @@ def test_single_replica_signal_generated():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = generate_signals(state)
     assert "signals" in result
     signals = result["signals"]
-    
+
     # Should have single replica signal
     single_rep_signals = [s for s in signals if "1 replica" in s["message"]]
     assert len(single_rep_signals) == 1
@@ -115,18 +112,15 @@ def test_privileged_container_signal():
                             "image": "nginx:1.21",
                             "privileged": True,
                             "requests": {},
-                            "limits": {}
+                            "limits": {},
                         }
-                    ]
+                    ],
                 }
             ],
             "pods": [],
-            "services": []
+            "services": [],
         },
-        "graph_summary": {
-            "orphan_services": [],
-            "single_replica_deployments": []
-        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
         "signals": [],
         "risk_score": {},
         "planner_decision": [],
@@ -134,13 +128,13 @@ def test_privileged_container_signal():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = generate_signals(state)
     assert "signals" in result
     signals = result["signals"]
-    
+
     # Should have privileged signal
     priv_signals = [s for s in signals if "privileged" in s["message"]]
     assert len(priv_signals) == 1
@@ -165,25 +159,22 @@ def test_signal_deduplication():
                             "image": "nginx:latest",
                             "privileged": False,
                             "requests": {},
-                            "limits": {}
+                            "limits": {},
                         },
                         {
                             "name": "container-2",
                             "image": "redis:latest",
                             "privileged": False,
                             "requests": {},
-                            "limits": {}
-                        }
-                    ]
+                            "limits": {},
+                        },
+                    ],
                 }
             ],
             "pods": [],
-            "services": []
+            "services": [],
         },
-        "graph_summary": {
-            "orphan_services": [],
-            "single_replica_deployments": []
-        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
         "signals": [],
         "risk_score": {},
         "planner_decision": [],
@@ -191,13 +182,13 @@ def test_signal_deduplication():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = generate_signals(state)
     assert "signals" in result
     signals = result["signals"]
-    
+
     # Each container should generate its own :latest signal (different container names)
     latest_signals = [s for s in signals if ":latest" in s["message"]]
     assert len(latest_signals) == 2
@@ -206,37 +197,36 @@ def test_signal_deduplication():
 def test_signal_cap_enforced():
     """Test that signals are capped at MAX_SIGNALS."""
     from kubesentinel.models import MAX_SIGNALS
-    
+
     # Create many deployments to generate many signals
     deployments = []
     for i in range(300):
-        deployments.append({
-            "name": f"dep-{i}",
-            "namespace": "default",
-            "replicas": 5,  # Will generate cost signal
-            "containers": [
-                {
-                    "name": "container",
-                    "image": "nginx:latest",  # Will generate security signal
-                    "privileged": False,
-                    "requests": {},
-                    "limits": {}  # Will generate cost + security signals
-                }
-            ]
-        })
-    
+        deployments.append(
+            {
+                "name": f"dep-{i}",
+                "namespace": "default",
+                "replicas": 5,  # Will generate cost signal
+                "containers": [
+                    {
+                        "name": "container",
+                        "image": "nginx:latest",  # Will generate security signal
+                        "privileged": False,
+                        "requests": {},
+                        "limits": {},  # Will generate cost + security signals
+                    }
+                ],
+            }
+        )
+
     state: InfraState = {
         "user_query": "test",
         "cluster_snapshot": {
             "nodes": [],
             "deployments": deployments,
             "pods": [],
-            "services": []
+            "services": [],
         },
-        "graph_summary": {
-            "orphan_services": [],
-            "single_replica_deployments": []
-        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
         "signals": [],
         "risk_score": {},
         "planner_decision": [],
@@ -244,12 +234,12 @@ def test_signal_cap_enforced():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = generate_signals(state)
     assert "signals" in result
     signals = result["signals"]
-    
+
     # Should be capped at MAX_SIGNALS
     assert len(signals) <= MAX_SIGNALS

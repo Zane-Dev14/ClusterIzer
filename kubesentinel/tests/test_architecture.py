@@ -89,9 +89,7 @@ class TestAgentIsolation:
         }
 
         tools = make_tools(state)
-        signals_tool = next(
-            (t for t in tools if t.name == "get_signals"), None
-        )
+        signals_tool = next((t for t in tools if t.name == "get_signals"), None)
         assert signals_tool is not None
 
         # Call tool to get signals
@@ -138,9 +136,7 @@ class TestAgentIsolation:
         }
 
         tools = make_tools(state)
-        graph_tool = next(
-            (t for t in tools if t.name == "get_graph_summary"), None
-        )
+        graph_tool = next((t for t in tools if t.name == "get_graph_summary"), None)
         assert graph_tool is not None
 
         result = graph_tool.func()
@@ -154,7 +150,9 @@ class TestAgentIsolation:
         # Verify no raw pod data
         result_str = json.dumps(parsed)
         assert "raw_fields" not in result_str, "Raw K8s fields leaked in graph summary"
-        assert "should_not_leak" not in result_str, "Sensitive data leaked in graph summary"
+        assert "should_not_leak" not in result_str, (
+            "Sensitive data leaked in graph summary"
+        )
 
 
 class TestToolBounds:
@@ -183,9 +181,7 @@ class TestToolBounds:
         }
 
         tools = make_tools(state)
-        signals_tool = next(
-            (t for t in tools if t.name == "get_signals"), None
-        )
+        signals_tool = next((t for t in tools if t.name == "get_signals"), None)
         assert signals_tool is not None, "signals tool must exist"
 
         result = signals_tool.func(category="reliability")
@@ -246,9 +242,7 @@ class TestToolBounds:
         }
 
         tools = make_tools(state)
-        cluster_tool = next(
-            (t for t in tools if t.name == "get_cluster_summary"), None
-        )
+        cluster_tool = next((t for t in tools if t.name == "get_cluster_summary"), None)
         assert cluster_tool is not None
 
         result = cluster_tool.func()
@@ -278,9 +272,7 @@ class TestErrorHandling:
         # Test with completely invalid JSON
         malformed_response = {
             "messages": [
-                {
-                    "content": "I found issues: [ malformed json without closing"
-                }
+                {"content": "I found issues: [ malformed json without closing"}
             ]
         }
 
@@ -310,9 +302,7 @@ class TestErrorHandling:
         """Verify JSON with wrong structure returns empty findings."""
         response_wrong_structure = {
             "messages": [
-                {
-                    "content": '```json\n{"not_findings": "this is unexpected"}\n```'
-                }
+                {"content": '```json\n{"not_findings": "this is unexpected"}\n```'}
             ]
         }
 
@@ -325,9 +315,7 @@ class TestErrorHandling:
         """Verify JSON with unexpected types in findings list returns empty."""
         response_wrong_types = {
             "messages": [
-                {
-                    "content": '```json\n{"findings": ["not", "a", "dict"]}\n```'
-                }
+                {"content": '```json\n{"findings": ["not", "a", "dict"]}\n```'}
             ]
         }
 
@@ -341,10 +329,10 @@ class TestErrorHandling:
         response_nested = {
             "messages": [
                 {
-                    "content": '```json\n'
+                    "content": "```json\n"
                     '{"findings": [{"issue": {"nested": {"data": [1, 2, '
                     '{"incomplete": '
-                    '}\n```'
+                    "}\n```"
                 }
             ]
         }
@@ -373,9 +361,7 @@ class TestErrorHandling:
     def test_logging_on_parse_failure(self, caplog):
         """Verify warning is logged on JSON parse failure."""
         with caplog.at_level(logging.WARNING):
-            malformed = {
-                "messages": [{"content": "broken [ json"}]
-            }
+            malformed = {"messages": [{"content": "broken [ json"}]}
             findings = _extract_json_findings(malformed)
 
         # Should log a warning but not crash

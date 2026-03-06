@@ -1,7 +1,7 @@
 import logging
 import copy
 from datetime import datetime
-from typing import Any
+from typing import Any, MutableMapping, cast
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langgraph.graph import StateGraph, END
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Global persistence manager
 _persistence_manager: PersistenceManager | None = None
 
+
 def get_persistence_manager() -> PersistenceManager:
     """Get or create persistence manager."""
     global _persistence_manager
@@ -33,35 +34,39 @@ def get_persistence_manager() -> PersistenceManager:
         _persistence_manager = PersistenceManager()
     return _persistence_manager
 
+
 def persist_snapshot(state: InfraState) -> InfraState:
     """Persist current snapshot and detect drift."""
     logger.info("Persisting snapshot...")
     pm = get_persistence_manager()
-    
+
     # Save snapshot - convert TypedDict to dict for persistence layer
     state_dict = dict(state)
     timestamp = pm.save_snapshot(state_dict)
     state["_snapshot_persisted_at"] = timestamp
     state["_snapshot_timestamp"] = datetime.utcnow().isoformat()
-    
+
     # Detect drift against previous snapshot
     drift_analysis = pm.analyze_drift(state_dict)
-    
+
     # Convert critical drifts to signals
-    if drift_analysis.get("summary", {}).get("critical_lost_count", 0) > 0 or \
-       drift_analysis.get("summary", {}).get("critical_risky_count", 0) > 0:
+    if (
+        drift_analysis.get("summary", {}).get("critical_lost_count", 0) > 0
+        or drift_analysis.get("summary", {}).get("critical_risky_count", 0) > 0
+    ):
         old_signals = state.get("signals", [])
         state["signals"] = drift_to_signals(drift_analysis, old_signals or [])
-    
+
     state["_drift_analysis"] = drift_analysis
     summary = drift_analysis.get("summary", {})
     logger.info(f"Drift detected: {summary.get('total_changes', 0)} changes")
-    
+
     return state
+
 
 def run_agents_parallel(state: InfraState) -> InfraState:
     """Run selected agents concurrently and merge findings.
-    
+
     Uses deep copy to prevent race conditions when agents read/modify state.
     """
     selected = set(state.get("planner_decision", []))
@@ -71,8 +76,10 @@ def run_agents_parallel(state: InfraState) -> InfraState:
         "security_agent": (security_agent_node, "security_findings"),
     }
 
+    # Use a mutable mapping view to perform dynamic key access on the TypedDict
+    mutable_state: MutableMapping[str, Any] = cast(MutableMapping[str, Any], state)
     for _, findings_key in agent_map.values():
-        state.setdefault(findings_key,[]) # type: ignore
+        mutable_state.setdefault(findings_key, [])
 
     run_targets = {name: cfg for name, cfg in agent_map.items() if name in selected}
     if not run_targets:
@@ -89,11 +96,15 @@ def run_agents_parallel(state: InfraState) -> InfraState:
             name, findings_key = futures[future]
             try:
                 result_state = future.result()
-                state[findings_key] = result_state.get(findings_key, [])
-                logger.debug(f"Agent {name} completed: {len(state[findings_key])} findings")
+                mutable_state[findings_key] = result_state.get(findings_key, [])
+                logger.debug(
+                    f"Agent {name} completed: {len(mutable_state[findings_key])} findings"
+                )
             except Exception as exc:
-                logger.error(f"{name} failed in parallel execution: {exc}", exc_info=True)
-                state[findings_key] = []
+                logger.error(
+                    f"{name} failed in parallel execution: {exc}", exc_info=True
+                )
+                mutable_state[findings_key] = []
 
     return state
 
@@ -129,7 +140,9 @@ def build_runtime_graph() -> Any:
     logger.info("Runtime graph compiled")
     return graph
 
+
 _graph = None
+
 
 def get_graph():
     """Get or create the runtime graph."""
@@ -138,9 +151,12 @@ def get_graph():
         _graph = build_runtime_graph()
     return _graph
 
-def run_engine(user_query: str, namespace: str | None = None, agents: list[str] | None = None) -> InfraState:
+
+def run_engine(
+    user_query: str, namespace: str | None = None, agents: list[str] | None = None
+) -> InfraState:
     """Run the complete KubeSentinel analysis engine.
-    
+
     Args:
         user_query: The analysis query
         namespace: Optional Kubernetes namespace to scan
@@ -151,7 +167,7 @@ def run_engine(user_query: str, namespace: str | None = None, agents: list[str] 
         logger.info(f"Namespace: {namespace}")
     if agents:
         logger.info(f"Agent override: {agents}")
-    
+
     # Initialize state
     initial_state: InfraState = {
         "user_query": user_query,
@@ -166,12 +182,14 @@ def run_engine(user_query: str, namespace: str | None = None, agents: list[str] 
         "strategic_summary": "",
         "final_report": "",
     }
-    
+
     # Pass namespace through context
     if namespace:
         initial_state["target_namespace"] = namespace
     try:
-        result = get_graph().invoke(initial_state, {"configurable": {"thread_id": "main"}})
+        result = get_graph().invoke(
+            initial_state, {"configurable": {"thread_id": "main"}}
+        )
         logger.info("Engine execution complete")
         return result
     except Exception as e:

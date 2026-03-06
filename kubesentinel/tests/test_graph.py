@@ -19,7 +19,7 @@ def test_deployment_to_pods_mapping():
                     "name": "nginx-deployment",
                     "namespace": "default",
                     "replicas": 3,
-                    "containers": []
+                    "containers": [],
                 }
             ],
             "pods": [
@@ -29,7 +29,7 @@ def test_deployment_to_pods_mapping():
                     "phase": "Running",
                     "node_name": "node-1",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
+                    "container_statuses": [],
                 },
                 {
                     "name": "nginx-deployment-def456",
@@ -37,7 +37,7 @@ def test_deployment_to_pods_mapping():
                     "phase": "Running",
                     "node_name": "node-1",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
+                    "container_statuses": [],
                 },
                 {
                     "name": "other-pod",
@@ -45,10 +45,10 @@ def test_deployment_to_pods_mapping():
                     "phase": "Running",
                     "node_name": "node-2",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
-                }
+                    "container_statuses": [],
+                },
             ],
-            "services": []
+            "services": [],
         },
         "graph_summary": {},
         "signals": [],
@@ -58,13 +58,13 @@ def test_deployment_to_pods_mapping():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = build_graph(state)
     assert "graph_summary" in result
     graph = result["graph_summary"]
-    
+
     dep_to_pods = graph["deployment_to_pods"]
     assert "default/nginx-deployment" in dep_to_pods
     assert len(dep_to_pods["default/nginx-deployment"]) == 2
@@ -83,7 +83,7 @@ def test_orphan_service_detection():
                     "name": "existing-deployment",
                     "namespace": "default",
                     "replicas": 1,
-                    "containers": []
+                    "containers": [],
                 }
             ],
             "pods": [],
@@ -92,15 +92,15 @@ def test_orphan_service_detection():
                     "name": "orphan-service",
                     "namespace": "default",
                     "type": "ClusterIP",
-                    "selector": {"app": "nonexistent"}
+                    "selector": {"app": "nonexistent"},
                 },
                 {
                     "name": "connected-service",
                     "namespace": "default",
                     "type": "ClusterIP",
-                    "selector": {"app": "exists"}
-                }
-            ]
+                    "selector": {"app": "exists"},
+                },
+            ],
         },
         "graph_summary": {},
         "signals": [],
@@ -110,13 +110,13 @@ def test_orphan_service_detection():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = build_graph(state)
     assert "graph_summary" in result
     graph = result["graph_summary"]
-    
+
     # Both services are orphans because there are no pods
     orphans = graph["orphan_services"]
     assert len(orphans) == 2
@@ -134,23 +134,23 @@ def test_single_replica_detection():
                     "name": "single-dep",
                     "namespace": "default",
                     "replicas": 1,
-                    "containers": []
+                    "containers": [],
                 },
                 {
                     "name": "multi-dep",
                     "namespace": "default",
                     "replicas": 3,
-                    "containers": []
+                    "containers": [],
                 },
                 {
                     "name": "another-single",
                     "namespace": "kube-system",
                     "replicas": 1,
-                    "containers": []
-                }
+                    "containers": [],
+                },
             ],
             "pods": [],
-            "services": []
+            "services": [],
         },
         "graph_summary": {},
         "signals": [],
@@ -160,13 +160,13 @@ def test_single_replica_detection():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = build_graph(state)
     assert "graph_summary" in result
     graph = result["graph_summary"]
-    
+
     single_replica = graph["single_replica_deployments"]
     assert len(single_replica) == 2
     assert "single-dep" in single_replica
@@ -180,16 +180,8 @@ def test_node_fanout_count():
         "user_query": "test",
         "cluster_snapshot": {
             "nodes": [
-                {
-                    "name": "node-1",
-                    "allocatable_cpu": "4",
-                    "allocatable_memory": "8Gi"
-                },
-                {
-                    "name": "node-2",
-                    "allocatable_cpu": "4",
-                    "allocatable_memory": "8Gi"
-                }
+                {"name": "node-1", "allocatable_cpu": "4", "allocatable_memory": "8Gi"},
+                {"name": "node-2", "allocatable_cpu": "4", "allocatable_memory": "8Gi"},
             ],
             "deployments": [],
             "pods": [
@@ -199,7 +191,7 @@ def test_node_fanout_count():
                     "phase": "Running",
                     "node_name": "node-1",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
+                    "container_statuses": [],
                 },
                 {
                     "name": "pod-2",
@@ -207,7 +199,7 @@ def test_node_fanout_count():
                     "phase": "Running",
                     "node_name": "node-1",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
+                    "container_statuses": [],
                 },
                 {
                     "name": "pod-3",
@@ -215,7 +207,7 @@ def test_node_fanout_count():
                     "phase": "Running",
                     "node_name": "node-1",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
+                    "container_statuses": [],
                 },
                 {
                     "name": "pod-4",
@@ -223,7 +215,7 @@ def test_node_fanout_count():
                     "phase": "Running",
                     "node_name": "node-2",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
+                    "container_statuses": [],
                 },
                 {
                     "name": "pod-5",
@@ -231,10 +223,10 @@ def test_node_fanout_count():
                     "phase": "Pending",
                     "node_name": "unscheduled",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
-                }
+                    "container_statuses": [],
+                },
             ],
-            "services": []
+            "services": [],
         },
         "graph_summary": {},
         "signals": [],
@@ -244,13 +236,13 @@ def test_node_fanout_count():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = build_graph(state)
     assert "graph_summary" in result
     graph = result["graph_summary"]
-    
+
     fanout = graph["node_fanout_count"]
     assert fanout["node-1"] == 3
     assert fanout["node-2"] == 1
@@ -272,7 +264,7 @@ def test_pod_to_node_mapping():
                     "phase": "Running",
                     "node_name": "node-1",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
+                    "container_statuses": [],
                 },
                 {
                     "name": "pod-b",
@@ -280,10 +272,10 @@ def test_pod_to_node_mapping():
                     "phase": "Running",
                     "node_name": "node-2",
                     "crash_loop_backoff": False,
-                    "container_statuses": []
-                }
+                    "container_statuses": [],
+                },
             ],
-            "services": []
+            "services": [],
         },
         "graph_summary": {},
         "signals": [],
@@ -293,13 +285,13 @@ def test_pod_to_node_mapping():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = build_graph(state)
     assert "graph_summary" in result
     graph = result["graph_summary"]
-    
+
     pod_to_node = graph["pod_to_node"]
     assert pod_to_node["default/pod-a"] == "node-1"
     assert pod_to_node["kube-system/pod-b"] == "node-2"

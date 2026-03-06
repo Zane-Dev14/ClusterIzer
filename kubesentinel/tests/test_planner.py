@@ -19,12 +19,14 @@ def test_planner_cost_query():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
     assert "planner_decision" in result
-    assert result["planner_decision"] == ["cost_agent"], f"Expected ['cost_agent'], got {result['planner_decision']}"
+    assert result["planner_decision"] == ["cost_agent"], (
+        f"Expected ['cost_agent'], got {result['planner_decision']}"
+    )
 
 
 def test_planner_security_query():
@@ -40,11 +42,13 @@ def test_planner_security_query():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
-    assert result["planner_decision"] == ["security_agent"], f"Expected ['security_agent'], got {result['planner_decision']}"
+    assert result["planner_decision"] == ["security_agent"], (
+        f"Expected ['security_agent'], got {result['planner_decision']}"
+    )
 
 
 def test_planner_reliability_query():
@@ -60,11 +64,13 @@ def test_planner_reliability_query():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
-    assert result["planner_decision"] == ["failure_agent"], f"Expected ['failure_agent'], got {result['planner_decision']}"
+    assert result["planner_decision"] == ["failure_agent"], (
+        f"Expected ['failure_agent'], got {result['planner_decision']}"
+    )
 
 
 def test_planner_node_query():
@@ -80,11 +86,13 @@ def test_planner_node_query():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
-    assert result["planner_decision"] == ["failure_agent"], f"Expected ['failure_agent'], got {result['planner_decision']}"
+    assert result["planner_decision"] == ["failure_agent"], (
+        f"Expected ['failure_agent'], got {result['planner_decision']}"
+    )
 
 
 def test_planner_architecture_query():
@@ -100,12 +108,14 @@ def test_planner_architecture_query():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
     expected = ["failure_agent", "cost_agent", "security_agent"]
-    assert set(result["planner_decision"]) == set(expected), f"Expected all agents, got {result['planner_decision']}"
+    assert set(result["planner_decision"]) == set(expected), (
+        f"Expected all agents, got {result['planner_decision']}"
+    )
 
 
 def test_planner_multi_category_query():
@@ -121,13 +131,19 @@ def test_planner_multi_category_query():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
-    assert "cost_agent" in result["planner_decision"], f"Expected cost_agent in {result['planner_decision']}"
-    assert "security_agent" in result["planner_decision"], f"Expected security_agent in {result['planner_decision']}"
-    assert "failure_agent" not in result["planner_decision"], f"Did not expect failure_agent in {result['planner_decision']}"
+    assert "cost_agent" in result["planner_decision"], (
+        f"Expected cost_agent in {result['planner_decision']}"
+    )
+    assert "security_agent" in result["planner_decision"], (
+        f"Expected security_agent in {result['planner_decision']}"
+    )
+    assert "failure_agent" not in result["planner_decision"], (
+        f"Did not expect failure_agent in {result['planner_decision']}"
+    )
 
 
 def test_planner_generic_query_defaults_to_failure():
@@ -143,11 +159,13 @@ def test_planner_generic_query_defaults_to_failure():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
-    assert result["planner_decision"] == ["failure_agent"], f"Expected default ['failure_agent'], got {result['planner_decision']}"
+    assert result["planner_decision"] == ["failure_agent"], (
+        f"Expected default ['failure_agent'], got {result['planner_decision']}"
+    )
 
 
 def test_planner_cli_override():
@@ -163,11 +181,13 @@ def test_planner_cli_override():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
-    assert result["planner_decision"] == ["cost_agent"], f"Expected CLI override ['cost_agent'], got {result['planner_decision']}"
+    assert result["planner_decision"] == ["cost_agent"], (
+        f"Expected CLI override ['cost_agent'], got {result['planner_decision']}"
+    )
 
 
 def test_planner_deduplication():
@@ -183,9 +203,11 @@ def test_planner_deduplication():
         "cost_findings": [],
         "security_findings": [],
         "strategic_summary": "",
-        "final_report": ""
+        "final_report": "",
     }
-    
+
     result = planner_node(state)
     # Should only have failure_agent once, not duplicated
-    assert result["planner_decision"].count("failure_agent") == 1, f"Expected no duplicates: {result['planner_decision']}"
+    assert result["planner_decision"].count("failure_agent") == 1, (
+        f"Expected no duplicates: {result['planner_decision']}"
+    )
