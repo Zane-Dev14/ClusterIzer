@@ -381,3 +381,135 @@ def test_replica_imbalance_signal_generated():
 
     assert len(imbalance) == 1
     assert "desired 3, running 1" in imbalance[0]["message"]
+
+
+def test_crashloop_with_diagnosis():
+    """Test that crashloop pods with crash_logs get automatic diagnosis attached."""
+    crash_log_with_lua_error = """
+2026/03/07 06:41:41 [error] 1#1: failed to initialize Lua VM in /usr/local/openresty/nginx/conf/nginx.conf:123
+nginx: [error] failed to initialize Lua VM in /usr/local/openresty/nginx/conf/nginx.conf:123
+    """
+
+    state: InfraState = {
+        "user_query": "test",
+        "cluster_snapshot": {
+            "nodes": [],
+            "deployments": [],
+            "pods": [
+                {
+                    "name": "media-frontend-abc",
+                    "namespace": "social-network",
+                    "phase": "Running",
+                    "node_name": "node-1",
+                    "crash_loop_backoff": True,
+                    "container_statuses": [
+                        {
+                            "name": "nginx",
+                            "ready": False,
+                            "restart_count": 5,
+                            "state": "CrashLoopBackOff",
+                        }
+                    ],
+                    "crash_logs": {
+                        "nginx": crash_log_with_lua_error,
+                    },
+                }
+            ],
+            "services": [],
+        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
+        "signals": [],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = generate_signals(state)
+    signals = result["signals"]
+
+    # Should have CrashLoopBackOff signal
+    crash_signals = [s for s in signals if s.get("signal_id") == "crashloop_pod"]
+    assert len(crash_signals) == 1
+
+    crash_signal = crash_signals[0]
+
+    # Should have diagnosis attached
+    assert "diagnosis" in crash_signal, "Crashloop signal should have diagnosis field"
+    diagnosis = crash_signal["diagnosis"]
+
+    # Verify diagnosis structure
+    assert diagnosis["type"] == "nginx_lua_init_fail"
+    assert diagnosis["confidence"] >= 0.85
+    assert "Lua" in diagnosis["root_cause"]
+    assert (
+        "nginx" in diagnosis["evidence"].lower()
+        or "lua" in diagnosis["evidence"].lower()
+    )
+    assert len(diagnosis["fix_plan"]) > 0
+    assert "container" in diagnosis
+    assert diagnosis["container"] == "nginx"
+
+    # Verify fix plan structure
+    first_step = diagnosis["fix_plan"][0]
+    assert "step_number" in first_step
+    assert "description" in first_step
+    assert first_step["step_number"] == 1
+
+    # At least one step should have a command
+    commands_present = any(step.get("command") for step in diagnosis["fix_plan"])
+    assert commands_present, "At least one fix step should have a command"
+
+
+def test_crashloop_without_diagnosis():
+    """Test that crashloop pods without crash_logs don't have diagnosis."""
+    state: InfraState = {
+        "user_query": "test",
+        "cluster_snapshot": {
+            "nodes": [],
+            "deployments": [],
+            "pods": [
+                {
+                    "name": "crashing-pod",
+                    "namespace": "default",
+                    "phase": "Running",
+                    "node_name": "node-1",
+                    "crash_loop_backoff": True,
+                    "container_statuses": [
+                        {
+                            "name": "app",
+                            "ready": False,
+                            "restart_count": 3,
+                            "state": "CrashLoopBackOff",
+                        }
+                    ],
+                    # No crash_logs field
+                }
+            ],
+            "services": [],
+        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
+        "signals": [],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = generate_signals(state)
+    signals = result["signals"]
+
+    # Should have CrashLoopBackOff signal
+    crash_signals = [s for s in signals if s.get("signal_id") == "crashloop_pod"]
+    assert len(crash_signals) == 1
+
+    crash_signal = crash_signals[0]
+
+    # Should NOT have diagnosis (no crash_logs available)
+    assert "diagnosis" not in crash_signal or crash_signal["diagnosis"] is None

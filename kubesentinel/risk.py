@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List,Optional
 
 from .models import InfraState
 
@@ -37,43 +37,68 @@ def _signal_title(signal_id: str, message: str) -> str:
     return message[:120]
 
 
-def _first_fix(signal_id: str, category: str, resources: List[str] = None) -> str:
-    """Generate kubectl command with actual resource names where possible."""
+def _first_fix(
+    signal_id: str,
+    category: str,
+    resources: Optional[List[str]] = None,
+    diagnosis: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate kubectl command with actual resource names where possible, or diagnosis-based fix plan."""
+    # If diagnosis is available, prioritize recommended_fix
+    if diagnosis:
+        # Show recommended fix if available
+        if diagnosis.get("recommended_fix"):
+            return diagnosis["recommended_fix"]
+
+        # Fallback to fix plan steps if no recommended_fix
+        if diagnosis.get("fix_plan"):
+            fix_steps = []
+            for step_dict in diagnosis["fix_plan"][:3]:  # Show first 3 steps
+                step_num = step_dict.get("step_number", "")
+                desc = step_dict.get("description", "")
+                cmd = step_dict.get("command", "")
+
+                if cmd:
+                    fix_steps.append(f"{step_num}. {desc}\n   {cmd}")
+                else:
+                    fix_steps.append(f"{step_num}. {desc}")
+
+            if fix_steps:
+                return "\n".join(fix_steps)
+
+    # Original logic for when diagnosis is not available
     # Extract example resource and namespace from provided resources
     # Resources are formatted as: "type/namespace/name" e.g., "pod/social-network/media-frontend-abc"
     # or "deployment/kube-system/coredns"
-    
+
     example_resource = None
     resource_name = None
     namespace = "default"
-    resource_type = None
-    
+
     if resources:
         # Get first non-unknown resource
         for res in resources:
             if res and res != "unknown":
                 example_resource = res
                 break
-    
+
     # Parse resource: format is "type/namespace/name"
     if example_resource and "/" in example_resource:
         parts = example_resource.split("/", 2)  # Split on first 2 "/" only
         if len(parts) == 3:
-            resource_type = parts[0]  # e.g., "pod", "deployment"
-            namespace = parts[1]      # e.g., "social-network", "kube-system"
+            namespace = parts[1]  # e.g., "social-network", "kube-system"
             resource_name = parts[2]  # e.g., "media-frontend-abc", "coredns"
         elif len(parts) == 2:
-            resource_type = parts[0]
             resource_name = parts[1]
             namespace = "default"
-    
+
     # Build commands with actual resource names where available
     if signal_id == "crashloop_pod" and resource_name and namespace:
         return f"kubectl logs {resource_name} -n {namespace} --previous --tail=100"
-    
+
     if signal_id == "replica_imbalance" and resource_name and namespace:
         return f"kubectl describe deployment {resource_name} -n {namespace}; kubectl get pods -n {namespace} -l app={resource_name}"
-    
+
     # Generic commands (with namespace)
     fixes = {
         "pending_pod_unscheduled": f"kubectl get nodes; kubectl top nodes; kubectl get events -n {namespace} --sort-by='.lastTimestamp'",
@@ -87,7 +112,7 @@ def _first_fix(signal_id: str, category: str, resources: List[str] = None) -> st
         "latest_image_tag": "kubectl get pods -A -o jsonpath='{.items[*].spec.containers[*].image}' | tr -s ' ' '\\n' | grep ':latest'",
         "single_replica": f"kubectl get deployment -n {namespace} -o wide | awk '\\$2==1'",
     }
-    
+
     if signal_id in fixes:
         return fixes[signal_id]
     if category == "security":
@@ -105,6 +130,7 @@ def _build_top_risks(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         severity = signal.get("severity", "low")
         message = signal.get("message", "")
         resource = signal.get("resource", "unknown")
+        diagnosis = signal.get("diagnosis")  # Extract diagnosis if present
 
         group_key = signal_id if signal_id != "unknown" else message
         if group_key not in grouped:
@@ -116,12 +142,17 @@ def _build_top_risks(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "affected_count": 0,
                 "resources": [],
                 "max_weight": 0.0,
+                "diagnosis": None,  # Track diagnosis for this signal group
             }
 
         entry = grouped[group_key]
         entry["affected_count"] += 1
         if len(entry["resources"]) < 5 and resource not in entry["resources"]:
             entry["resources"].append(resource)
+
+        # Store diagnosis if this signal has one (use first diagnosis found for the group)
+        if diagnosis and not entry["diagnosis"]:
+            entry["diagnosis"] = diagnosis
 
         base = SEVERITY_WEIGHTS.get(severity, 1)
         mult = CATEGORY_MULTIPLIERS.get(category, CATEGORY_MULTIPLIERS["default"])
@@ -133,18 +164,23 @@ def _build_top_risks(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ranked = []
     for entry in grouped.values():
         impact = float(entry["max_weight"]) * float(entry["affected_count"])
-        ranked.append(
-            {
-                "id": entry["id"],
-                "title": entry["title"],
-                "category": entry["category"],
-                "severity": entry["severity"],
-                "affected_count": entry["affected_count"],
-                "impact_score": round(impact, 2),
-                "resources": entry["resources"],
-                "first_fix": _first_fix(entry["id"], entry["category"], entry["resources"]),
-            }
-        )
+        risk_dict = {
+            "id": entry["id"],
+            "title": entry["title"],
+            "category": entry["category"],
+            "severity": entry["severity"],
+            "affected_count": entry["affected_count"],
+            "impact_score": round(impact, 2),
+            "resources": entry["resources"],
+            "first_fix": _first_fix(
+                entry["id"], entry["category"], entry["resources"], entry["diagnosis"]
+            ),
+        }
+        # Include diagnosis in the risk dict if present
+        if entry["diagnosis"]:
+            risk_dict["diagnosis"] = entry["diagnosis"]
+
+        ranked.append(risk_dict)
 
     ranked.sort(
         key=lambda item: (
@@ -237,7 +273,6 @@ def compute_risk(state: InfraState) -> InfraState:
 
             # Volume component (acknowledge issue count, but cap impact)
             # This ensures excessive low-severity signals don't dominate score
-            volume_factor = min(1.5, 1.0 + (signal_count - 5) / 100.0)
             volume_component = min(45.0, signal_count * 0.5)
 
             # Distribution modifier: reduce score if mostly low/medium

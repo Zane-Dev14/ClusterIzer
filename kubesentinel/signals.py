@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Any, List, Set, Tuple, Optional
 
 from .models import InfraState, MAX_SIGNALS
+from .diagnostics import diagnose_crash_logs
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +85,12 @@ def _add_signal(
     message: str,
     cis_control: Optional[str] = None,
     signal_id: Optional[str] = None,
+    diagnosis: Optional[Dict[str, Any]] = None,
 ) -> None:
     key = (category, resource, message)
     if key not in seen:
         seen.add(key)
-        signal = {
+        signal: Dict[str, Any] = {
             "category": category,
             "severity": severity,
             "resource": resource,
@@ -98,6 +100,8 @@ def _add_signal(
             signal["cis_control"] = cis_control
         if signal_id:
             signal["signal_id"] = signal_id
+        if diagnosis:
+            signal["diagnosis"] = diagnosis
         signals.append(signal)
 
 
@@ -120,6 +124,33 @@ def _generate_pod_signals(snapshot: Dict[str, Any], seen: Set, signals: List) ->
             )
 
         if pod.get("crash_loop_backoff"):
+            # Attempt to diagnose crashloop from collected logs
+            diagnosis_dict = None
+            if crash_logs := pod.get("crash_logs"):
+                # Try to diagnose each container's crash logs
+                for container_name, log_text in crash_logs.items():
+                    diagnosis_result = diagnose_crash_logs(
+                        log_text, pod["name"], pod["namespace"], container_name
+                    )
+                    if diagnosis_result:
+                        # Convert DiagnosisResult to dict for storage in signal
+                        diagnosis_dict = {
+                            "type": diagnosis_result.type,
+                            "root_cause": diagnosis_result.root_cause,
+                            "confidence": diagnosis_result.confidence,
+                            "evidence": diagnosis_result.evidence,
+                            "fix_plan": [
+                                step.to_dict() for step in diagnosis_result.fix_plan
+                            ],
+                            "verification_commands": diagnosis_result.verification_commands,
+                            "container": container_name,
+                        }
+                        logger.info(
+                            f"Diagnosed {diagnosis_result.type} for {pod['namespace']}/{pod['name']}/{container_name} "
+                            f"with {diagnosis_result.confidence * 100:.0f}% confidence"
+                        )
+                        break  # Use first successful diagnosis
+
             _add_signal(
                 signals,
                 seen,
@@ -128,6 +159,7 @@ def _generate_pod_signals(snapshot: Dict[str, Any], seen: Set, signals: List) ->
                 resource,
                 "Pod in CrashLoopBackOff state",
                 signal_id="crashloop_pod",
+                diagnosis=diagnosis_dict,
             )
         for cs in pod.get("container_statuses", []):
             if not cs.get("ready") and cs.get("state") != "Running":

@@ -5,6 +5,7 @@ from kubernetes.client.rest import ApiException
 
 from .models import InfraState, MAX_PODS, MAX_DEPLOYMENTS, MAX_SERVICES, MAX_NODES
 from .crd_discovery import discover_crds
+from .diagnostics import fetch_pod_logs
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ def scan_cluster(state: InfraState) -> InfraState:
     deployments = _extract_deployments(deployments_raw.items[:MAX_DEPLOYMENTS])
     pods = _extract_pods(pods_raw.items[:MAX_PODS])
     services = _extract_services(services_raw.items[:MAX_SERVICES])
+
+    # Collect crash logs for crashloop pods
+    _collect_crashloop_logs(core_v1, pods)
 
     # Fetch ReplicaSets for ownership resolution
     replicasets = []
@@ -501,3 +505,62 @@ def _parse_memory_to_mib(mem_str: str) -> int:
         return int(float(mem_str) / (1024 * 1024))
     except (ValueError, TypeError):
         return 0
+
+
+def _collect_crashloop_logs(
+    api_client: client.CoreV1Api, pods: List[Dict[str, Any]]
+) -> None:
+    """
+    Collect logs from crashloop pods and attach to pod data structure.
+
+    Iterates pods with crash_loop_backoff=True and fetches logs from containers
+    with high restart counts. Logs are added to pod dict as 'crash_logs' field.
+
+    Args:
+        api_client: Kubernetes CoreV1Api client instance
+        pods: List of pod dictionaries (modified in place)
+    """
+    crashloop_pods = [p for p in pods if p.get("crash_loop_backoff")]
+    if not crashloop_pods:
+        logger.debug("No crashloop pods detected, skipping log collection")
+        return
+
+    logger.info(f"Collecting logs from {len(crashloop_pods)} crashloop pod(s)...")
+
+    for pod in crashloop_pods:
+        pod_name = pod["name"]
+        namespace = pod["namespace"]
+        crash_logs = {}
+
+        # Collect logs for each container with restart count > 0
+        for container_status in pod.get("container_statuses", []):
+            container_name = container_status["name"]
+            restart_count = container_status.get("restart_count", 0)
+
+            # Only fetch logs if container has restarted (indicates it crashed)
+            if restart_count > 0:
+                logger.debug(
+                    f"Fetching logs for {namespace}/{pod_name}/{container_name} "
+                    f"(restart_count={restart_count})"
+                )
+                log_text = fetch_pod_logs(
+                    api_client=api_client,
+                    pod_name=pod_name,
+                    namespace=namespace,
+                    container=container_name,
+                    tail_lines=100,
+                )
+                if log_text:
+                    crash_logs[container_name] = log_text
+                    logger.debug(
+                        f"Collected {len(log_text)} bytes of logs from "
+                        f"{namespace}/{pod_name}/{container_name}"
+                    )
+
+        # Attach crash logs to pod dictionary (empty dict if no logs collected)
+        if crash_logs:
+            pod["crash_logs"] = crash_logs
+            logger.info(
+                f"Collected crash logs from {len(crash_logs)} container(s) "
+                f"in pod {namespace}/{pod_name}"
+            )

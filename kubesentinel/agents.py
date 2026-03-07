@@ -733,8 +733,6 @@ def synthesizer_node(state: InfraState) -> InfraState:
     )
     risk = state.get("risk_score", {})
     snapshot = state.get("cluster_snapshot", {})
-    graph = state.get("graph_summary", {})
-    planner_meta = state.get("planner_metadata", {})
     top_risks = risk.get("top_risks", [])
 
     # Extract concrete resource examples from top_risks for LLM to use
@@ -742,6 +740,8 @@ def synthesizer_node(state: InfraState) -> InfraState:
     namespaces_used = set()
     deployments_used = set()
     pods_used = set()
+    diagnosis_info = []  # Track diagnosis information for context
+
     for risk_item in top_risks[:3]:  # First 3 risks
         resources = risk_item.get("resources", [])[:2]  # Up to 2 examples per risk
         for res in resources:
@@ -754,13 +754,25 @@ def synthesizer_node(state: InfraState) -> InfraState:
             if "pod/" in res:
                 pods_used.add(res)
 
+        # Extract diagnosis if present
+        if diagnosis := risk_item.get("diagnosis"):
+            diagnosis_summary = {
+                "risk_title": risk_item.get("title"),
+                "type": diagnosis.get("type"),
+                "root_cause": diagnosis.get("root_cause"),
+                "confidence": diagnosis.get("confidence"),
+                "evidence": diagnosis.get("evidence", "")[:200],  # Truncate evidence
+                "recommended_fix": diagnosis.get("recommended_fix"),
+            }
+            diagnosis_info.append(diagnosis_summary)
+
     # Build prompt with explicit resource references
-    context = f"""User Query: {state.get('user_query', 'Unknown')}
+    context = f"""User Query: {state.get("user_query", "Unknown")}
 
 CONCRETE RESOURCES FROM THIS CLUSTER (use these exact names in commands):
-Namespaces: {', '.join(sorted(namespaces_used)) if namespaces_used else 'default, kube-system, social-network'}
-Example Deployments: {', '.join(resource_examples[:3]) if resource_examples else 'deployment/social-network/media-frontend'}
-Example Pods: {', '.join([e for e in resource_examples if 'pod/' in e][:2]) if any('pod/' in e for e in resource_examples) else 'pod/social-network/media-frontend-64dd9f988-2nkmd'}
+Namespaces: {", ".join(sorted(namespaces_used)) if namespaces_used else "default, kube-system, social-network"}
+Example Deployments: {", ".join(resource_examples[:3]) if resource_examples else "deployment/social-network/media-frontend"}
+Example Pods: {", ".join([e for e in resource_examples if "pod/" in e][:2]) if any("pod/" in e for e in resource_examples) else "pod/social-network/media-frontend-64dd9f988-2nkmd"}
 
 RISK SUMMARY:
 Risk: {risk.get("score", 0)}/100 (Grade: {risk.get("grade", "N/A")}), Signals: {risk.get("signal_count", 0)}
@@ -768,7 +780,18 @@ Cluster: nodes={len(snapshot.get("nodes", []))}, deployments={len(snapshot.get("
 
 TOP 5 RISKS (use these exact resource names in your commands):
 {json.dumps(top_risks, indent=2)}
+"""
 
+    # Add diagnosis information if any risks have automated diagnosis
+    if diagnosis_info:
+        context += f"""
+AUTOMATED ROOT CAUSE DIAGNOSIS (high confidence):
+{json.dumps(diagnosis_info, indent=2)}
+
+The diagnosis above was automatically determined by analyzing crash logs. When answering the user's question, reference the specific root cause and evidence provided.
+"""
+
+    context += f"""
 AGENT FINDINGS:
 Failure Findings ({len(failure)}): {json.dumps(failure[:5], indent=2)}
 Cost Findings ({len(cost)}): {json.dumps(cost[:5], indent=2)}
@@ -781,14 +804,18 @@ INSTRUCTIONS: Produce strategic summary per your instructions. Use ONLY resource
         )
         summary = response.content if hasattr(response, "content") else str(response)
         summary = str(summary) if not isinstance(summary, str) else summary
-        
+
         # Check for and warn about placeholders in output
-        placeholder_pattern = r'<[a-z\-_]+>'
+        placeholder_pattern = r"<[a-z\-_]+>"
         placeholders_found = re.findall(placeholder_pattern, summary, re.IGNORECASE)
         if placeholders_found:
-            logger.warning(f"Synthesizer output contains placeholders: {set(placeholders_found)}")
-            logger.warning("This indicates LLM is not using concrete resource names from context")
-        
+            logger.warning(
+                f"Synthesizer output contains placeholders: {set(placeholders_found)}"
+            )
+            logger.warning(
+                "This indicates LLM is not using concrete resource names from context"
+            )
+
         state["strategic_summary"] = (
             summary[:4000] + "\n[Summary truncated]" if len(summary) > 4000 else summary
         )
