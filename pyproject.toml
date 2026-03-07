@@ -20,7 +20,7 @@ dependencies = [
 kubesentinel = "kubesentinel.main:app"
 
 [tool.setuptools]
-packages = ["kubesentinel"]
+packages = { find = { where = ["."], exclude = ["tests*"] } }
 
 [tool.uv]
 package = true
