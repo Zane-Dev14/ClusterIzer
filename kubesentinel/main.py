@@ -58,6 +58,11 @@ def scan(
         "--agents",
         help="Override planner: comma-separated list of agents (failure,cost,security)",
     ),
+    git_repo: Optional[str] = typer.Option(
+        None,
+        "--git-repo",
+        help="Desired state source (Git URL or local manifest path)",
+    ),
     ci_mode: bool = typer.Option(
         False, "--ci", help="CI mode: exit 1 if grade >= D, minimal output"
     ),
@@ -100,7 +105,12 @@ def scan(
                 )
                 agents_list = None
 
-        state = run_engine(query, namespace=namespace, agents=agents_list)
+        state = run_engine(
+            query,
+            namespace=namespace,
+            agents=agents_list,
+            git_repo=git_repo,
+        )
 
         if not json_output:
             console.print("📝 [bold]Generating report...[/bold]")

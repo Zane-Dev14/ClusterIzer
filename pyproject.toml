@@ -11,12 +11,16 @@ dependencies = [
     "langchain-ollama>=0.3.3",
     "langgraph>=1.0.10",
     "pydantic>=2.12.5",
+    "PyYAML>=6.0.2",
     "rich>=14.3.3",
     "typer>=0.24.1",
 ]
 
 [project.scripts]
 kubesentinel = "kubesentinel.main:app"
+
+[tool.setuptools]
+packages = ["kubesentinel"]
 
 [tool.uv]
 package = true

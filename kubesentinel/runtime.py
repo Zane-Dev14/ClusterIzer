@@ -20,6 +20,7 @@ from .agents import (
     synthesizer_node,
 )
 from .persistence import PersistenceManager, drift_to_signals
+from .git_loader import load_git_desired_state
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,20 @@ def persist_snapshot(state: InfraState) -> InfraState:
     summary = drift_analysis.get("summary", {})
     logger.info(f"Drift detected: {summary.get('total_changes', 0)} changes")
 
+    return state
+
+
+def load_desired_state(state: InfraState) -> InfraState:
+    """Optionally load desired state from Git repository or local manifest path."""
+    git_repo = state.get("git_repo")
+    if not git_repo:
+        return state
+
+    logger.info(f"Loading desired state from: {git_repo}")
+    desired = load_git_desired_state(repo_url=git_repo, local_path=None, branch="main")
+    state["_desired_state_snapshot"] = desired
+    desired_count = sum(len(items) for items in desired.values())
+    logger.info(f"Loaded desired state resources: {desired_count}")
     return state
 
 
@@ -115,6 +130,7 @@ def build_runtime_graph() -> Any:
     builder = StateGraph(InfraState)
     for name, func in [
         ("scan_cluster", scan_cluster),
+        ("load_desired_state", load_desired_state),
         ("build_graph", build_graph),
         ("generate_signals", generate_signals),
         ("persist_snapshot", persist_snapshot),
@@ -125,7 +141,8 @@ def build_runtime_graph() -> Any:
     ]:
         builder.add_node(name, func)
     for src, dst in [
-        ("scan_cluster", "build_graph"),
+        ("scan_cluster", "load_desired_state"),
+        ("load_desired_state", "build_graph"),
         ("build_graph", "generate_signals"),
         ("generate_signals", "persist_snapshot"),
         ("persist_snapshot", "compute_risk"),
@@ -153,7 +170,10 @@ def get_graph():
 
 
 def run_engine(
-    user_query: str, namespace: str | None = None, agents: list[str] | None = None
+    user_query: str,
+    namespace: str | None = None,
+    agents: list[str] | None = None,
+    git_repo: str | None = None,
 ) -> InfraState:
     """Run the complete KubeSentinel analysis engine.
 
@@ -167,6 +187,8 @@ def run_engine(
         logger.info(f"Namespace: {namespace}")
     if agents:
         logger.info(f"Agent override: {agents}")
+    if git_repo:
+        logger.info(f"Desired state source: {git_repo}")
 
     # Initialize state
     initial_state: InfraState = {
@@ -186,6 +208,8 @@ def run_engine(
     # Pass namespace through context
     if namespace:
         initial_state["target_namespace"] = namespace
+    if git_repo:
+        initial_state["git_repo"] = git_repo
     try:
         result = get_graph().invoke(
             initial_state, {"configurable": {"thread_id": "main"}}

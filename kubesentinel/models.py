@@ -41,6 +41,8 @@ class InfraState(TypedDict, total=False):
     target_namespace: Optional[
         str
     ]  # Kubernetes namespace to scope scan (None = all namespaces)
+    git_repo: Optional[str]  # Desired-state repo URL or local path
+    _desired_state_snapshot: Optional[Dict[str, List[Dict[str, Any]]]]
 
     # Persistence/Drift tracking (optional, added during execution)
     _drift_analysis: Optional[Dict[str, Any]]  # Drift detection results

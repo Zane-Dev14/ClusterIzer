@@ -5,6 +5,16 @@ from .models import InfraState, MAX_SIGNALS
 
 logger = logging.getLogger(__name__)
 
+DRIFT_MISSING_RESOURCE = "DRIFT_MISSING_RESOURCE"
+DRIFT_EXTRA_RESOURCE = "DRIFT_EXTRA_RESOURCE"
+DRIFT_CONFIG_CHANGE = "DRIFT_CONFIG_CHANGE"
+
+DRIFT_SIGNAL_SEVERITY = {
+    DRIFT_MISSING_RESOURCE: "high",
+    DRIFT_EXTRA_RESOURCE: "low",
+    DRIFT_CONFIG_CHANGE: "medium",
+}
+
 # CIS Kubernetes Benchmark mappings (v1.7.0 controls)
 CIS_MAPPINGS = {
     # Container-level (5.2.x)
