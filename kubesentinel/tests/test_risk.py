@@ -66,7 +66,7 @@ def test_single_critical_signal():
 
 
 def test_score_capped_at_100():
-    """Test that score is capped at 100 even with many signals."""
+    """Test that score is properly normalized with distribution-aware formula."""
     # Create many critical signals
     signals = []
     for i in range(20):
@@ -97,8 +97,9 @@ def test_score_capped_at_100():
     assert "risk_score" in result
     risk = result["risk_score"]
 
-    # 20 critical signals = 20 * 15 = 300, but capped at 100
-    assert risk["score"] == 100
+    # 20 critical signals with 100% severity ratio: score should be high but differentiated
+    # severity_component = (20*15*1.8/20)*3 = 81, volume = 10 → 91
+    assert risk["score"] == 91
     assert risk["grade"] == "F"
     assert risk["signal_count"] == 20
 
@@ -295,3 +296,53 @@ def test_grade_D_F_boundary():
     assert "risk_score" in result_f
     assert result_f["risk_score"]["score"] == 90
     assert result_f["risk_score"]["grade"] == "F"
+
+
+def test_risk_includes_top_risks_structure():
+    """Risk output should include deterministic top risk ranking."""
+    state: InfraState = {
+        "user_query": "test",
+        "cluster_snapshot": {},
+        "graph_summary": {},
+        "signals": [
+            {
+                "signal_id": "pending_pod_unscheduled",
+                "category": "reliability",
+                "severity": "high",
+                "resource": "pod/social-network/a",
+                "message": "Pod is Pending and unschedulable",
+            },
+            {
+                "signal_id": "pending_pod_unscheduled",
+                "category": "reliability",
+                "severity": "high",
+                "resource": "pod/social-network/b",
+                "message": "Pod is Pending and unschedulable",
+            },
+            {
+                "signal_id": "crashloop_pod",
+                "category": "reliability",
+                "severity": "critical",
+                "resource": "pod/social-network/c",
+                "message": "Pod in CrashLoopBackOff state",
+            },
+        ],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = compute_risk(state)
+    top_risks = result["risk_score"].get("top_risks", [])
+
+    assert isinstance(top_risks, list)
+    assert len(top_risks) > 0
+    first = top_risks[0]
+    assert "id" in first
+    assert "title" in first
+    assert "affected_count" in first
+    assert "first_fix" in first

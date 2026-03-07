@@ -148,10 +148,32 @@ def planner_node(state: InfraState) -> InfraState:
 
     # Extract tokens (words >= 3 chars)
     tokens = set(re.findall(r"\b[a-z]{3,}\b", query))
+
+    # Expand common synonyms so high-level prompts route correctly.
+    synonyms = {
+        "risks": {"risk", "reliability"},
+        "risk": {"reliability"},
+        "pending": {"capacity", "pressure", "reliability"},
+        "production": {"architecture", "security", "reliability", "cost"},
+    }
+    expanded_tokens = set(tokens)
+    for token in list(tokens):
+        expanded_tokens.update(synonyms.get(token, set()))
+
     if VERBOSE:
         logger.debug(f"Planner tokens: {tokens}")
+        logger.debug(f"Planner expanded tokens: {expanded_tokens}")
 
-    agents = []
+    phrase_routes = {
+        r"top\s*\d*\s*risks?": ["failure_agent", "cost_agent", "security_agent"],
+        r"fix\s+first": ["failure_agent", "cost_agent", "security_agent"],
+        r"production\s+risk": ["failure_agent", "cost_agent", "security_agent"],
+        r"pods?\s+pending": ["failure_agent", "cost_agent"],
+    }
+    phrase_agents = []
+    for pattern, route in phrase_routes.items():
+        if re.search(pattern, query):
+            phrase_agents.extend(route)
 
     # Architecture queries explicitly request all agents
     architecture_keywords = {
@@ -162,13 +184,20 @@ def planner_node(state: InfraState) -> InfraState:
         "deep",
         "comprehensive",
     }
-    if any(w in tokens for w in architecture_keywords):
+    if any(w in expanded_tokens for w in architecture_keywords):
         agents = ["failure_agent", "cost_agent", "security_agent"]
         logger.info(f"Planner selected agents: {agents} (architecture query)")
         state["planner_decision"] = agents
+        state["planner_metadata"] = {
+            "tokens": sorted(tokens),
+            "expanded_tokens": sorted(expanded_tokens),
+            "scores": {"failure_agent": 1, "cost_agent": 1, "security_agent": 1},
+            "confidence": "high",
+            "reason": "architecture_query",
+        }
         return state
 
-    # Cost routing
+    # Score-based routing
     cost_keywords = {
         "cost",
         "costs",
@@ -187,17 +216,18 @@ def planner_node(state: InfraState) -> InfraState:
         "savings",
         "waste",
     }
-    if any(w in tokens for w in cost_keywords):
-        agents.append("cost_agent")
+    security_keywords = {
+        "security",
+        "secure",
+        "vuln",
+        "cve",
+        "cis",
+        "privilege",
+        "audit",
+        "exposure",
+        "compliance",
+    }
 
-    # Security routing
-    if any(
-        w in tokens
-        for w in ("security", "secure", "vuln", "cve", "cis", "privilege", "audit")
-    ):
-        agents.append("security_agent")
-
-    # Reliability routing
     reliability_keywords = {
         "reliability",
         "failure",
@@ -207,14 +237,25 @@ def planner_node(state: InfraState) -> InfraState:
         "redundancy",
         "health",
         "pressure",
+        "risk",
+        "capacity",
+        "pending",
+        "scheduling",
     }
-    if any(w in tokens for w in reliability_keywords):
-        agents.append("failure_agent")
 
-    # Node-related queries also trigger failure agent (node pressure)
-    if any(w in tokens for w in ("node", "memory", "disk", "pressure", "capacity")):
-        if "failure_agent" not in agents:
-            agents.append("failure_agent")
+    node_keywords = {"node", "memory", "disk", "pressure", "capacity"}
+
+    scores = {
+        "failure_agent": len(expanded_tokens & reliability_keywords)
+        + len(expanded_tokens & node_keywords),
+        "cost_agent": len(expanded_tokens & cost_keywords),
+        "security_agent": len(expanded_tokens & security_keywords),
+    }
+
+    for agent in phrase_agents:
+        scores[agent] += 2
+
+    agents = [agent for agent, score in scores.items() if score > 0]
 
     # If no specific routing matched, default to failure_agent for generic queries
     if not agents:
@@ -233,6 +274,17 @@ def planner_node(state: InfraState) -> InfraState:
 
     logger.info(f"Planner selected agents: {unique_agents}")
     state["planner_decision"] = unique_agents
+    state["planner_metadata"] = {
+        "tokens": sorted(tokens),
+        "expanded_tokens": sorted(expanded_tokens),
+        "scores": scores,
+        "confidence": "high"
+        if max(scores.values()) >= 3
+        else "medium"
+        if max(scores.values()) >= 1
+        else "low",
+        "reason": "scored_routing",
+    }
     return state
 
 
@@ -680,17 +732,63 @@ def synthesizer_node(state: InfraState) -> InfraState:
         state.get("security_findings", []),
     )
     risk = state.get("risk_score", {})
-    context = f"""Risk: {risk.get("score", 0)}/100 (Grade: {risk.get("grade", "N/A")}), Signals: {risk.get("signal_count", 0)}
-Failure: {len(failure)} - {json.dumps(failure[:10], indent=2)}
-Cost: {len(cost)} - {json.dumps(cost[:10], indent=2)}
-Security: {len(security)} - {json.dumps(security[:10], indent=2)}
-Produce strategic summary per your instructions."""
+    snapshot = state.get("cluster_snapshot", {})
+    graph = state.get("graph_summary", {})
+    planner_meta = state.get("planner_metadata", {})
+    top_risks = risk.get("top_risks", [])
+
+    # Extract concrete resource examples from top_risks for LLM to use
+    resource_examples = []
+    namespaces_used = set()
+    deployments_used = set()
+    pods_used = set()
+    for risk_item in top_risks[:3]:  # First 3 risks
+        resources = risk_item.get("resources", [])[:2]  # Up to 2 examples per risk
+        for res in resources:
+            resource_examples.append(res)
+            if "/" in res:
+                parts = res.split("/")
+                if len(parts) >= 2:
+                    namespaces_used.add(parts[0])
+                    deployments_used.add(res)
+            if "pod/" in res:
+                pods_used.add(res)
+
+    # Build prompt with explicit resource references
+    context = f"""User Query: {state.get('user_query', 'Unknown')}
+
+CONCRETE RESOURCES FROM THIS CLUSTER (use these exact names in commands):
+Namespaces: {', '.join(sorted(namespaces_used)) if namespaces_used else 'default, kube-system, social-network'}
+Example Deployments: {', '.join(resource_examples[:3]) if resource_examples else 'deployment/social-network/media-frontend'}
+Example Pods: {', '.join([e for e in resource_examples if 'pod/' in e][:2]) if any('pod/' in e for e in resource_examples) else 'pod/social-network/media-frontend-64dd9f988-2nkmd'}
+
+RISK SUMMARY:
+Risk: {risk.get("score", 0)}/100 (Grade: {risk.get("grade", "N/A")}), Signals: {risk.get("signal_count", 0)}
+Cluster: nodes={len(snapshot.get("nodes", []))}, deployments={len(snapshot.get("deployments", []))}, pods={len(snapshot.get("pods", []))}, services={len(snapshot.get("services", []))}
+
+TOP 5 RISKS (use these exact resource names in your commands):
+{json.dumps(top_risks, indent=2)}
+
+AGENT FINDINGS:
+Failure Findings ({len(failure)}): {json.dumps(failure[:5], indent=2)}
+Cost Findings ({len(cost)}): {json.dumps(cost[:5], indent=2)}
+Security Findings ({len(security)}): {json.dumps(security[:5], indent=2)}
+
+INSTRUCTIONS: Produce strategic summary per your instructions. Use ONLY resource names that appear above in the CONCRETE RESOURCES and TOP 5 RISKS sections. NO placeholders."""
     try:
         response = LLM.invoke(
             [SystemMessage(content=system_prompt), HumanMessage(content=context)]
         )
         summary = response.content if hasattr(response, "content") else str(response)
         summary = str(summary) if not isinstance(summary, str) else summary
+        
+        # Check for and warn about placeholders in output
+        placeholder_pattern = r'<[a-z\-_]+>'
+        placeholders_found = re.findall(placeholder_pattern, summary, re.IGNORECASE)
+        if placeholders_found:
+            logger.warning(f"Synthesizer output contains placeholders: {set(placeholders_found)}")
+            logger.warning("This indicates LLM is not using concrete resource names from context")
+        
         state["strategic_summary"] = (
             summary[:4000] + "\n[Summary truncated]" if len(summary) > 4000 else summary
         )

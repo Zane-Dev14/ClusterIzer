@@ -136,6 +136,7 @@ def _build_risk_section(state: InfraState) -> str:
     score = risk.get("score", 0)
     grade = risk.get("grade", "N/A")
     signal_count = risk.get("signal_count", 0)
+    top_risks = risk.get("top_risks", [])
 
     lines = [
         "## ⚠️ Reliability Risk Assessment\n",
@@ -160,6 +161,26 @@ def _build_risk_section(state: InfraState) -> str:
                     if count > 0:
                         lines.append(f"  - {severity}: {count}")
                 lines.append("")
+
+    if top_risks:
+        lines.append("### Top Risks (Prioritized)\n")
+        for idx, risk_item in enumerate(top_risks, start=1):
+            title = risk_item.get("title", "Unknown risk")
+            severity = risk_item.get("severity", "low")
+            count = risk_item.get("affected_count", 0)
+            category = risk_item.get("category", "default")
+            resources = risk_item.get("resources", [])
+            first_fix = risk_item.get("first_fix", "Review this risk and remediate.")
+
+            lines.append(
+                f"{idx}. **{title}** ({severity}, {category}) - affects **{count}** resources"
+            )
+            if resources:
+                lines.append(
+                    f"   - Example resources: {', '.join(f'`{r}`' for r in resources[:3])}"
+                )
+            lines.append(f"   - First fix: {first_fix}")
+        lines.append("")
 
     lines.append("---\n")
     return "\n".join(lines)

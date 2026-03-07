@@ -81,7 +81,9 @@ def load_git_repository(repo_url: str, branch: str, path: str) -> Path:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
-        raise RuntimeError(f"Failed to clone repository '{repo_url}': {stderr}") from exc
+        raise RuntimeError(
+            f"Failed to clone repository '{repo_url}': {stderr}"
+        ) from exc
 
     return clone_root
 
@@ -157,9 +159,13 @@ def normalize_resource(obj: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def classify_resources(resources: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+def classify_resources(
+    resources: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
     """Classify normalized resources into the fixed 9-key desired-state schema."""
-    classified: Dict[str, List[Dict[str, Any]]] = {key: [] for key in DESIRED_STATE_KEYS}
+    classified: Dict[str, List[Dict[str, Any]]] = {
+        key: [] for key in DESIRED_STATE_KEYS
+    }
 
     for resource in resources:
         bucket = KIND_MAP.get(resource.get("kind", ""), "crds")

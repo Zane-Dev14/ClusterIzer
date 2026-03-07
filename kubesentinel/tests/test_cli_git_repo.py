@@ -25,7 +25,12 @@ metadata:
         captured["git_repo"] = git_repo
         return {
             "user_query": user_query,
-            "cluster_snapshot": {"nodes": [], "deployments": [], "pods": [], "services": []},
+            "cluster_snapshot": {
+                "nodes": [],
+                "deployments": [],
+                "pods": [],
+                "services": [],
+            },
             "graph_summary": {},
             "signals": [],
             "risk_score": {"score": 0, "grade": "A", "signal_count": 0},

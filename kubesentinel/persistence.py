@@ -388,14 +388,16 @@ class PersistenceManager:
                     else:
                         (warnings if drift.severity == "high" else info).append(drift)
                 else:
-                    (warnings if drift.severity in ["high", "critical"] else info).append(
-                        drift
-                    )
+                    (
+                        warnings if drift.severity in ["high", "critical"] else info
+                    ).append(drift)
             elif drift.drift_type in {"spec_drift", "label_drift", "replica_drift"}:
                 warnings.append(drift)
             elif drift.drift_type == "extra_resource":
                 info.append(drift)
-            elif drift.drift_type == "signal_delta" and drift.old_value == "not_detected":
+            elif (
+                drift.drift_type == "signal_delta" and drift.old_value == "not_detected"
+            ):
                 (critical_risky if drift.severity == "critical" else warnings).append(
                     drift
                 )
@@ -694,7 +696,9 @@ def _extract_live_spec(resource: Dict[str, Any], kind: str) -> Dict[str, Any]:
     if kind == "daemonset":
         return {
             "selector": resource.get("selector", {}),
-            "updateStrategy": {"type": resource.get("update_strategy", "RollingUpdate")},
+            "updateStrategy": {
+                "type": resource.get("update_strategy", "RollingUpdate")
+            },
             "template": {
                 "metadata": {"labels": resource.get("pod_labels", {})},
                 "spec": {"containers": resource.get("containers", [])},
@@ -715,7 +719,8 @@ def _extract_replicas(
         return None
     if source == "live":
         return int(resource.get("replicas", 1))
-    spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
+    spec_value = resource.get("spec")
+    spec: Dict[str, Any] = spec_value if isinstance(spec_value, dict) else {}
     return int(spec.get("replicas", 1))
 
 
@@ -759,8 +764,12 @@ def _desired_drift_to_records(
                 severity="medium",
                 resource_type=item.get("kind", "resource"),
                 resource_key=item["resource_key"],
-                old_value=json.dumps(item.get("old_value"), sort_keys=True, default=str),
-                new_value=json.dumps(item.get("new_value"), sort_keys=True, default=str),
+                old_value=json.dumps(
+                    item.get("old_value"), sort_keys=True, default=str
+                ),
+                new_value=json.dumps(
+                    item.get("new_value"), sort_keys=True, default=str
+                ),
                 description=item["description"],
             )
         )

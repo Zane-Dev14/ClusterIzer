@@ -50,6 +50,7 @@ def generate_signals(state: InfraState) -> InfraState:
 
     # Pod and container signals
     _generate_pod_signals(snapshot, seen, signals)
+    _generate_pending_pod_signals(snapshot, graph, seen, signals)
     _generate_container_signals(snapshot, seen, signals)
 
     # Workload signals
@@ -59,6 +60,11 @@ def generate_signals(state: InfraState) -> InfraState:
 
     # Service and network signals
     _generate_service_signals(snapshot, graph, seen, signals)
+
+    # Node and ownership integrity signals
+    _generate_node_signals(snapshot, seen, signals)
+    _generate_node_capacity_signals(snapshot, graph, seen, signals)
+    _generate_orphan_workload_signals(snapshot, graph, seen, signals)
 
     # Namespace-level signals
     _generate_namespace_signals(snapshot, seen, signals)
@@ -121,6 +127,7 @@ def _generate_pod_signals(snapshot: Dict[str, Any], seen: Set, signals: List) ->
                 "critical",
                 resource,
                 "Pod in CrashLoopBackOff state",
+                signal_id="crashloop_pod",
             )
         for cs in pod.get("container_statuses", []):
             if not cs.get("ready") and cs.get("state") != "Running":
@@ -150,6 +157,7 @@ def _generate_deployment_signals(
                 "medium",
                 f"deployment/{dep['namespace']}/{dep_name}",
                 "Deployment has only 1 replica (no redundancy)",
+                signal_id="single_replica",
             )
 
     # High replica count
@@ -162,6 +170,156 @@ def _generate_deployment_signals(
                 "low",
                 f"deployment/{dep['namespace']}/{dep['name']}",
                 f"Deployment has {dep['replicas']} replicas (may be over-provisioned)",
+            )
+
+    _generate_replica_health_signals(snapshot, graph, seen, signals)
+
+
+def _generate_pending_pod_signals(
+    snapshot: Dict[str, Any],
+    graph: Dict[str, Any],
+    seen: Set,
+    signals: List,
+) -> None:
+    """Detect Pending pod scheduling issues and aggregate by namespace/workload."""
+    pods = snapshot.get("pods", [])
+    pending_pods = [p for p in pods if p.get("phase") == "Pending"]
+
+    for pod in pending_pods:
+        resource = f"pod/{pod['namespace']}/{pod['name']}"
+        unscheduled = pod.get("node_name") == "unscheduled"
+        _add_signal(
+            signals,
+            seen,
+            "reliability",
+            "high" if unscheduled else "medium",
+            resource,
+            "Pod is Pending and unschedulable" if unscheduled else "Pod is Pending",
+            signal_id="pending_pod_unscheduled" if unscheduled else "pending_pod",
+        )
+
+    if pending_pods:
+        by_namespace: Dict[str, int] = {}
+        for pod in pending_pods:
+            ns = pod.get("namespace", "default")
+            by_namespace[ns] = by_namespace.get(ns, 0) + 1
+
+        for namespace, count in by_namespace.items():
+            if count >= 5:
+                _add_signal(
+                    signals,
+                    seen,
+                    "reliability",
+                    "critical" if count >= 20 else "high",
+                    f"namespace/{namespace}",
+                    f"{count} pods are Pending in namespace {namespace}",
+                    signal_id="pending_pods_namespace",
+                )
+
+
+def _generate_replica_health_signals(
+    snapshot: Dict[str, Any],
+    graph: Dict[str, Any],
+    seen: Set,
+    signals: List,
+) -> None:
+    """Compare desired replicas against currently running pods per deployment."""
+    deployments = snapshot.get("deployments", [])
+    pods = snapshot.get("pods", [])
+    ownership_index = graph.get("ownership_index", {})
+
+    running_by_deployment: Dict[str, int] = {}
+    for pod in pods:
+        pod_key = f"{pod.get('namespace')}/{pod.get('name')}"
+        chain = ownership_index.get(pod_key, {})
+        top_controller = chain.get("top_controller")
+        if not top_controller:
+            continue
+        if pod.get("phase") == "Running" and chain.get("deployment"):
+            running_by_deployment[top_controller] = (
+                running_by_deployment.get(top_controller, 0) + 1
+            )
+
+    for dep in deployments:
+        desired = int(dep.get("replicas", 1) or 1)
+        dep_key = f"{dep.get('namespace')}/{dep.get('name')}"
+        running = running_by_deployment.get(dep_key, 0)
+        if desired <= 0:
+            continue
+        if running < desired:
+            gap_ratio = (desired - running) / desired
+            severity = "high" if gap_ratio >= 0.5 else "medium"
+            _add_signal(
+                signals,
+                seen,
+                "reliability",
+                severity,
+                f"deployment/{dep.get('namespace')}/{dep.get('name')}",
+                f"Replica imbalance: desired {desired}, running {running}",
+                signal_id="replica_imbalance",
+            )
+
+
+def _generate_node_capacity_signals(
+    snapshot: Dict[str, Any],
+    graph: Dict[str, Any],
+    seen: Set,
+    signals: List,
+) -> None:
+    """Estimate node CPU allocation pressure from pod placement and deployment requests."""
+    nodes = snapshot.get("nodes", [])
+    pods = snapshot.get("pods", [])
+    deployments = snapshot.get("deployments", [])
+    ownership_index = graph.get("ownership_index", {})
+
+    dep_cpu_requests: Dict[str, float] = {}
+    for dep in deployments:
+        dep_key = f"{dep.get('namespace')}/{dep.get('name')}"
+        total_req = 0.0
+        for container in dep.get("containers", []):
+            total_req += float(container.get("requests_cpu_millicores", 0) or 0)
+        dep_cpu_requests[dep_key] = total_req
+
+    node_requested_cpu: Dict[str, float] = {}
+    for pod in pods:
+        node_name = pod.get("node_name")
+        if not node_name or node_name == "unscheduled":
+            continue
+        pod_key = f"{pod.get('namespace')}/{pod.get('name')}"
+        chain = ownership_index.get(pod_key, {})
+        dep_key = chain.get("deployment")
+        if not dep_key:
+            continue
+        node_requested_cpu[node_name] = node_requested_cpu.get(node_name, 0.0) + float(
+            dep_cpu_requests.get(dep_key, 0.0)
+        )
+
+    for node in nodes:
+        node_name = node.get("name", "unknown")
+        allocatable_cpu = float(node.get("allocatable_cpu_millicores", 0) or 0)
+        requested_cpu = float(node_requested_cpu.get(node_name, 0.0))
+        if allocatable_cpu <= 0:
+            continue
+        utilization = (requested_cpu / allocatable_cpu) * 100
+        if utilization >= 100:
+            _add_signal(
+                signals,
+                seen,
+                "reliability",
+                "critical",
+                f"node/{node_name}",
+                f"Node CPU allocation exhausted at {utilization:.1f}% requested",
+                signal_id="node_cpu_exhaustion",
+            )
+        elif utilization >= 90:
+            _add_signal(
+                signals,
+                seen,
+                "reliability",
+                "high",
+                f"node/{node_name}",
+                f"Node CPU allocation pressure at {utilization:.1f}% requested",
+                signal_id="node_allocation_pressure",
             )
 
 

@@ -243,3 +243,141 @@ def test_signal_cap_enforced():
 
     # Should be capped at MAX_SIGNALS
     assert len(signals) <= MAX_SIGNALS
+
+
+def test_pending_pods_generate_signals():
+    """Pending pods should generate unschedulable and namespace aggregate signals."""
+    pods = []
+    for i in range(6):
+        pods.append(
+            {
+                "name": f"pending-{i}",
+                "namespace": "social-network",
+                "phase": "Pending",
+                "node_name": "unscheduled",
+                "crash_loop_backoff": False,
+                "container_statuses": [],
+                "owner_references": [],
+            }
+        )
+
+    state: InfraState = {
+        "user_query": "test",
+        "cluster_snapshot": {
+            "nodes": [],
+            "deployments": [],
+            "pods": pods,
+            "services": [],
+        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
+        "signals": [],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = generate_signals(state)
+    signals = result["signals"]
+
+    pending = [s for s in signals if s.get("signal_id") == "pending_pod_unscheduled"]
+    namespace_rollup = [
+        s for s in signals if s.get("signal_id") == "pending_pods_namespace"
+    ]
+    assert len(pending) == 6
+    assert len(namespace_rollup) == 1
+
+
+def test_node_pressure_signals_are_generated():
+    """Node condition signals should be emitted when pressure conditions are true."""
+    state: InfraState = {
+        "user_query": "test",
+        "cluster_snapshot": {
+            "nodes": [
+                {
+                    "name": "node-1",
+                    "conditions": {"MemoryPressure": True, "Ready": False},
+                    "allocatable_cpu_millicores": 2000,
+                }
+            ],
+            "deployments": [],
+            "pods": [],
+            "services": [],
+        },
+        "graph_summary": {"orphan_services": [], "single_replica_deployments": []},
+        "signals": [],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = generate_signals(state)
+    signals = result["signals"]
+    ids = {s.get("signal_id") for s in signals}
+
+    assert "memory_pressure" in ids
+    assert "node_not_ready" in ids
+
+
+def test_replica_imbalance_signal_generated():
+    """Replica mismatch should be detected from desired vs running pods."""
+    state: InfraState = {
+        "user_query": "test",
+        "cluster_snapshot": {
+            "nodes": [],
+            "deployments": [
+                {
+                    "name": "api",
+                    "namespace": "social-network",
+                    "replicas": 3,
+                    "containers": [],
+                }
+            ],
+            "pods": [
+                {
+                    "name": "api-1",
+                    "namespace": "social-network",
+                    "phase": "Running",
+                    "node_name": "node-1",
+                    "crash_loop_backoff": False,
+                    "container_statuses": [],
+                    "owner_references": [],
+                }
+            ],
+            "services": [],
+        },
+        "graph_summary": {
+            "orphan_services": [],
+            "single_replica_deployments": [],
+            "ownership_index": {
+                "social-network/api-1": {
+                    "replicaset": "social-network/api-rs",
+                    "deployment": "social-network/api",
+                    "statefulset": None,
+                    "top_controller": "social-network/api",
+                }
+            },
+        },
+        "signals": [],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = generate_signals(state)
+    signals = result["signals"]
+    imbalance = [s for s in signals if s.get("signal_id") == "replica_imbalance"]
+
+    assert len(imbalance) == 1
+    assert "desired 3, running 1" in imbalance[0]["message"]

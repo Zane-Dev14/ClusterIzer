@@ -21,6 +21,9 @@ class InfraState(TypedDict, total=False):
 
     # Planner output
     planner_decision: List[str]  # ["failure_agent", "cost_agent", ...]
+    planner_metadata: Optional[
+        Dict[str, Any]
+    ]  # Planner routing metadata {tokens, expanded_tokens, scores, confidence, reason}
 
     # Agent outputs
     failure_findings: List[

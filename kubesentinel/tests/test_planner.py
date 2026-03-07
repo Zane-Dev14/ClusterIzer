@@ -211,3 +211,45 @@ def test_planner_deduplication():
     assert result["planner_decision"].count("failure_agent") == 1, (
         f"Expected no duplicates: {result['planner_decision']}"
     )
+
+
+def test_planner_top_risks_query_routes_all_agents():
+    """Executive top-risks query should trigger multi-agent analysis."""
+    state: InfraState = {
+        "user_query": "If this cluster were production, what are the top 5 risks?",
+        "cluster_snapshot": {},
+        "graph_summary": {},
+        "signals": [],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = planner_node(state)
+    expected = {"failure_agent", "cost_agent", "security_agent"}
+    assert set(result["planner_decision"]) == expected
+
+
+def test_planner_fix_first_query_routes_all_agents():
+    """Fix-priority query should not collapse to only failure_agent."""
+    state: InfraState = {
+        "user_query": "Why are pods pending and what should I fix first?",
+        "cluster_snapshot": {},
+        "graph_summary": {},
+        "signals": [],
+        "risk_score": {},
+        "planner_decision": [],
+        "failure_findings": [],
+        "cost_findings": [],
+        "security_findings": [],
+        "strategic_summary": "",
+        "final_report": "",
+    }
+
+    result = planner_node(state)
+    expected = {"failure_agent", "cost_agent", "security_agent"}
+    assert set(result["planner_decision"]) == expected
