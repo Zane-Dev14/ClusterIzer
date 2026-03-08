@@ -139,6 +139,7 @@ def _generate_pod_signals(snapshot: Dict[str, Any], seen: Set, signals: List) ->
                             "root_cause": diagnosis_result.root_cause,
                             "confidence": diagnosis_result.confidence,
                             "evidence": diagnosis_result.evidence,
+                            "recommended_fix": diagnosis_result.recommended_fix,
                             "fix_plan": [
                                 step.to_dict() for step in diagnosis_result.fix_plan
                             ],

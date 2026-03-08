@@ -104,6 +104,98 @@ uv run kubesentinel scan --verbose
 
 ---
 
+## Slack Integration (Socket Mode)
+
+KubeSentinel can be accessed directly from Slack without any HTTP endpoint or ngrok.
+
+### Setup
+
+1. **Create a Slack app:**
+   - Go to [api.slack.com/apps](https://api.slack.com/apps)
+   - Click "Create New App" → "From scratch"
+   - Name: `KubeSentinel`
+   - Workspace: your workspace
+
+2. **Enable Socket Mode:**
+   - Go to Settings → Socket Mode
+   - Toggle "Enable Socket Mode" ON
+   - Generate an App-Level Token (`xapp-...`)
+   - Copy this to `SLACK_APP_TOKEN` in `.env`
+
+3. **Configure OAuth & Permissions:**
+   - Go to OAuth & Permissions
+   - Under "Bot Token Scopes", add:
+     - `chat:write`
+     - `app_mentions:read`
+     - `channels:history`
+     - `im:history`
+   - Copy the Bot Token (`xoxb-...`) to `SLACK_BOT_TOKEN` in `.env`
+
+4. **Subscribe to Events:**
+   - Go to Event Subscriptions
+   - Toggle "Enable Events" ON
+   - Under "Subscribe to bot events", add:
+     - `app_mention`
+     - `message.im`
+   - Save
+
+5. **Get local credentials:**
+   ```bash
+   cp .env.example .env
+   # Edit .env and paste your Bot Token and App Token
+   ```
+
+6. **Run the bot:**
+   ```bash
+   uv run kubesentinel-slack
+   ```
+
+   (Or: `uv run python -m kubesentinel.integrations.slack_bot`)
+
+### Usage
+
+Once the bot is running, you can ask KubeSentinel questions in Slack:
+
+**Mention the bot in a channel:**
+```
+@kubesentinel why are pods pending
+```
+
+**Send a direct message to the bot:**
+```
+why are pods pending
+```
+
+The bot will respond in a thread with:
+- Risk score (0-100) and grade (A-F)
+- Strategic summary
+- Top findings (reliability, cost, security)
+
+Example reply:
+```
+KubeSentinel Analysis
+
+Risk Score: 63/100 (C) 🟡 Medium
+
+Summary:
+Cluster has 2 pods in pending state due to node resource constraints.
+Redis deployment lacks resource limits.
+
+Top Findings:
+• Unschedulable pods due to insufficient CPU
+• Missing resource limits on deployments
+• CrashLoopBackOff in media-frontend
+```
+
+### Important Security Notes
+
+- **Never commit `.env` with real tokens.**
+- `.env` is in `.gitignore` — keep it local only.
+- Rotate tokens immediately if exposed:
+  - Go to api.slack.com/apps → your app → Regenerate tokens
+
+---
+
 ## Output
 
 KubeSentinel generates `report.md` with the following sections:

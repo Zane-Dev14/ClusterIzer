@@ -17,7 +17,7 @@ from .models import InfraState, MAX_FINDINGS
 logger = logging.getLogger(__name__)
 
 # Initialize LLM
-LLM = ChatOllama(model="llama3.1:8b-instruct-q8_0", temperature=0)
+LLM = ChatOllama(model="qwen3:30b", temperature=0)
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 

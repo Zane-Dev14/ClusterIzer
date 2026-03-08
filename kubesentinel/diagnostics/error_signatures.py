@@ -464,43 +464,43 @@ ERROR_SIGNATURES = [
 def _get_recommended_fix(
     signature_type: str, pod_name: str, namespace: str, container: str, evidence: str
 ) -> Optional[str]:
-    """Generate recommended actionable fix based on signature type."""
+    """Generate recommended actionable fix based on signature type - DIRECT, EXECUTABLE FIXES ONLY."""
     if signature_type == "nginx_lua_init_fail":
-        lua_patch = '{"data":{"lua_package_path":"/usr/local/openresty/lualib/?;/usr/local/openresty/site/lualib/?"}}'
+        # Extract deployment name from pod_name (format: deployment-hash-pod-id)
+        # e.g., "media-frontend-64dd9f988-2nkmd" -> "media-frontend"
+        deployment_name = pod_name.rsplit("-", 2)[0] if "-" in pod_name else pod_name
         return (
-            f"FIX: Rebuild the container image with required Lua modules installed.\n"
-            f"Option 1 - Update Dockerfile: ADD luarocks install lfs lua-cjson && rebuild image\n"
-            f"Option 2 - If using ConfigMap: kubectl patch configmap nginx-config -p '{lua_patch}' -n {namespace}"
+            f"1. Update Dockerfile: add `RUN luarocks install lfs lua-cjson` to the OpenResty container build\n"
+            f"2. Rebuild and push image\n"
+            f"3. Redeploy: kubectl rollout restart deployment {deployment_name} -n {namespace}\n"
+            f"4. Verify: kubectl get pod -n {namespace} -l app={deployment_name} -o wide"
         )
     elif signature_type == "oom_killed":
-        return (
-            f"FIX: Increase memory limit in deployment from current value.\n"
-            f"kubectl set resources deployment -n {namespace} -c {container} --limits=memory=1Gi --requests=memory=512Mi"
-        )
+        return f"kubectl set resources deployment -n {namespace} --limits=memory=2Gi --requests=memory=1Gi"
     elif signature_type == "permission_denied":
+        json_patch = '[{"op": "add", "path": "/spec/template/spec/securityContext", "value":{"runAsUser": 1000, "fsGroup": 1000}}]'
         return (
-            f"FIX: Update securityContext to run with appropriate user/group.\n"
-            f"kubectl edit deployment -n {namespace} # Add runAsUser: 1000, fsGroup: 1000"
+            f"kubectl patch deployment -n {namespace} --type='json' -p='{json_patch}'"
         )
     elif signature_type == "address_in_use":
-        return (
-            f"FIX: Change containerPort to unused port in deployment.\n"
-            f"kubectl edit deployment -n {namespace} # Update containerPort to available port"
-        )
+        return f"Update containerPort in deployment spec to use an available port, then: kubectl rollout restart deployment -n {namespace}"
     elif signature_type == "module_not_found":
         return (
-            "FIX: Rebuild container image with missing Python/Node module.\n"
-            "Update Dockerfile: RUN pip install <module-name> (or npm install <module-name>)"
+            "1. Identify missing module from error message\n"
+            "2. Add to Dockerfile: RUN pip install <module-name> (Python) or RUN npm install <module-name> (Node.js)\n"
+            "3. Rebuild image and redeploy"
         )
     elif signature_type == "connection_refused":
         return (
-            f"FIX: Verify target service is running and accessible.\n"
-            f"kubectl get svc -n {namespace} && kubectl get endpoints -n {namespace}"
+            f"1. Verify service is running: kubectl get pod -n {namespace} -o wide\n"
+            f"2. Check endpoints: kubectl get endpoints -n {namespace}\n"
+            f"3. If service not running, scale deployment: kubectl scale deployment <service-name> --replicas=1 -n {namespace}"
         )
     elif signature_type == "database_unavailable":
         return (
-            f"FIX: Ensure database service is running and credentials are correct.\n"
-            f"kubectl get pods -n {namespace} -l app=database && kubectl get secrets -n {namespace}"
+            f"1. Check database pod status: kubectl get pod -n {namespace} -l app=database\n"
+            f"2. Verify credentials secret exists: kubectl get secret -n {namespace} <db-secret-name>\n"
+            f"3. If pod not running, scale it: kubectl scale deployment <database-deployment> --replicas=1 -n {namespace}"
         )
     return None
 

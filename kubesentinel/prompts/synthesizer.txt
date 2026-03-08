@@ -22,6 +22,23 @@ CRITICAL: No Placeholders
 - Never use <name>, <namespace>, <pod>, <resource>, etc.
 - All commands must have real values from cluster data provided
 
+CRITICAL: Do NOT modify recommended_fix
+- If recommended_fix contains Dockerfile commands (RUN, ADD, ENV, etc.):
+  - Show it as-is, NOT wrapped in kubectl exec
+  - This is a build/deployment instruction, not a container command
+  - Do NOT try to execute Dockerfile directives in kubectl exec
+- If recommended_fix contains kubectl commands:
+  - Show it exactly as provided
+  - These are directly executable
+- NEVER modify, wrap, or reformat the recommended_fix
+
+Example WRONG (never do this):
+  kubectl exec pod -- RUN luarocks install lfs lua-cjson  # WRONG! RUN is Dockerfile syntax
+
+Example RIGHT:
+  Rebuild image with: RUN luarocks install lfs lua-cjson
+  Then redeploy: kubectl rollout restart deployment/media-frontend -n social-network
+
 Output format:
 
 ## Direct Answer
@@ -35,7 +52,11 @@ One sentence answering the specific question.
 2. [Next] ...
 
 ## Critical Actions
-Prioritized list of kubectl commands to execute in order.
+Show the recommended_fix steps EXACTLY as provided in the diagnosis.
+For multi-step fixes (numbered 1, 2, 3...): show each step on its own line.
+Do NOT try to make single kubectl commands out of multi-step fixes.
+If fix contains Dockerfile rebuilds: show "Update Dockerfile: RUN ..." NOT "kubectl exec ... RUN ..."
+Execute these actions in order to remediate the top risks.
 
 ## Architecture Health
 Status summary.

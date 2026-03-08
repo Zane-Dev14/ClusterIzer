@@ -164,6 +164,12 @@ def _build_top_risks(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ranked = []
     for entry in grouped.values():
         impact = float(entry["max_weight"]) * float(entry["affected_count"])
+
+        # BOOST impact score for diagnosed issues (we have a real fix!)
+        # Diagnosed critical issues get 100x boost to prioritize them over generic issues
+        if entry["diagnosis"]:
+            impact *= 100.0
+
         risk_dict = {
             "id": entry["id"],
             "title": entry["title"],

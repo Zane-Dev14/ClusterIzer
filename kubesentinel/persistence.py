@@ -76,7 +76,9 @@ class PersistenceManager:
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.conn = sqlite3.connect(str(self.db_path))
+        # Use check_same_thread=False to allow multi-threaded access (e.g., from Slack bot)
+        # Safe because we don't hold transactions across threads
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
         logger.info(f"Persistence initialized: {self.db_path}")
