@@ -853,3 +853,83 @@ def _drift_to_dict(drift: Drift) -> Dict[str, Any]:
         "new_value": drift.new_value,
         "description": drift.description,
     }
+
+
+def log_agent_output(agent_name: str, raw_output: str) -> None:
+    """Log unparseable agent output to JSONL file for debugging.
+
+    Args:
+        agent_name: Name of the agent that produced the output (e.g., 'failure_agent')
+        raw_output: Raw text output from agent (e.g., LLM response that failed JSON parse)
+    """
+    try:
+        traces_dir = Path("runtime_traces")
+        traces_dir.mkdir(exist_ok=True)
+
+        timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        log_file = traces_dir / f"agent_outputs_{timestamp_str}.log"
+
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": agent_name,
+            "parse_ok": False,
+            "content": raw_output,
+        }
+
+        with open(log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception as e:
+        logger.warning(f"Failed to log agent output: {e}")
+
+
+def log_kubectl_execution(
+    user: str,
+    command: str,
+    ok: bool,
+    stdout: str,
+    stderr: str,
+    elapsed_seconds: float = 0.0,
+    approver_user_id: Optional[str] = None,
+) -> None:
+    """Log kubectl execution attempt to JSONL file for audit trail.
+
+    Args:
+        user: Slack user ID or username who triggered execution
+        command: Full command string (e.g., 'kubectl patch deployment nginx')
+        ok: Whether execution succeeded (returncode == 0)
+        stdout: Command stdout output
+        stderr: Command stderr output
+        elapsed_seconds: Execution time in seconds
+        approver_user_id: Slack user ID of person who approved (if applicable)
+    """
+    try:
+        traces_dir = Path("runtime_traces")
+        traces_dir.mkdir(exist_ok=True)
+
+        timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        log_file = traces_dir / f"kubectl_execution_{timestamp_str}.log"
+
+        import shlex
+
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = []
+
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "user": user,
+            "command": command,
+            "argv": argv,
+            "executed": True,
+            "ok": ok,
+            "stdout": stdout,
+            "stderr": stderr,
+            "elapsed_seconds": elapsed_seconds,
+            "approver_user_id": approver_user_id,
+        }
+
+        with open(log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception as e:
+        logger.warning(f"Failed to log kubectl execution: {e}")

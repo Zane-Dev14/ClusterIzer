@@ -1,0 +1,12 @@
+graph TD
+    slack_bot --> runtime
+    runtime --> cluster
+    runtime --> agents
+    runtime --> synthesizer
+    runtime --> reporting
+    cluster --> graph_builder
+    graph_builder --> signals
+    agents --> signals
+    agents --> cost
+    agents --> risk
+    synthesizer --> reporting

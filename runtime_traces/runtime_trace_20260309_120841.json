@@ -1,0 +1,141 @@
+{
+  "start_time": "2026-03-09T12:06:46.873939",
+  "end_time": "2026-03-09T12:08:41.270450",
+  "events": [
+    {
+      "timestamp": "2026-03-09T12:06:46.887308",
+      "event": "node_enter",
+      "node": "scan_cluster"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.131589",
+      "event": "node_exit",
+      "node": "scan_cluster",
+      "elapsed_seconds": 0.24,
+      "state_summary": {
+        "findings_count": 0,
+        "signals_count": 0
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.132045",
+      "event": "node_enter",
+      "node": "load_desired_state"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.132075",
+      "event": "node_exit",
+      "node": "load_desired_state",
+      "elapsed_seconds": 0.0,
+      "state_summary": {
+        "findings_count": 0,
+        "signals_count": 0
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.132763",
+      "event": "node_enter",
+      "node": "build_graph"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.133138",
+      "event": "node_exit",
+      "node": "build_graph",
+      "elapsed_seconds": 0.0,
+      "state_summary": {
+        "findings_count": 0,
+        "signals_count": 0
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.133407",
+      "event": "node_enter",
+      "node": "generate_signals"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.134439",
+      "event": "node_exit",
+      "node": "generate_signals",
+      "elapsed_seconds": 0.0,
+      "state_summary": {
+        "findings_count": 0,
+        "signals_count": 153
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.135125",
+      "event": "node_enter",
+      "node": "persist_snapshot"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.142476",
+      "event": "node_exit",
+      "node": "persist_snapshot",
+      "elapsed_seconds": 0.01,
+      "state_summary": {
+        "findings_count": 0,
+        "signals_count": 153
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.142737",
+      "event": "node_enter",
+      "node": "compute_risk"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.143334",
+      "event": "node_exit",
+      "node": "compute_risk",
+      "elapsed_seconds": 0.0,
+      "state_summary": {
+        "findings_count": 0,
+        "signals_count": 153
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.143589",
+      "event": "node_enter",
+      "node": "planner"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.144111",
+      "event": "node_exit",
+      "node": "planner",
+      "elapsed_seconds": 0.0,
+      "state_summary": {
+        "findings_count": 0,
+        "signals_count": 153
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.144357",
+      "event": "node_enter",
+      "node": "run_agents_parallel"
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.147149",
+      "event": "node_exit",
+      "node": "run_agents_parallel",
+      "elapsed_seconds": 0.0,
+      "state_summary": {
+        "findings_count": 2,
+        "signals_count": 153
+      }
+    },
+    {
+      "timestamp": "2026-03-09T12:06:47.147365",
+      "event": "node_enter",
+      "node": "synthesizer"
+    },
+    {
+      "timestamp": "2026-03-09T12:08:41.262970",
+      "event": "node_exit",
+      "node": "synthesizer",
+      "elapsed_seconds": 114.12,
+      "state_summary": {
+        "findings_count": 2,
+        "signals_count": 153
+      }
+    }
+  ]
+}

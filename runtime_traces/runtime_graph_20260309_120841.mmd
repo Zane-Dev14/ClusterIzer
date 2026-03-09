@@ -1,0 +1,18 @@
+graph TD
+  N0["🔍 Scan Cluster<br/>(0.24s)"]
+  N1["📋 Load Desired State<br/>(0.0s)"]
+  N2["🕸️ Build Graph<br/>(0.0s)"]
+  N3["⚠️ Generate Signals<br/>(0.0s)"]
+  N4["💾 Persist Snapshot<br/>(0.01s)"]
+  N5["📊 Compute Risk<br/>(0.0s)"]
+  N6["🤖 Planner<br/>(0.0s)"]
+  N7["⚙️ Run Agents Parallel<br/>(0.0s)"]
+  N8["📝 Synthesizer<br/>(114.12s)"]
+  N0 --> N1
+  N1 --> N2
+  N2 --> N3
+  N3 --> N4
+  N4 --> N5
+  N5 --> N6
+  N6 --> N7
+  N7 --> N8

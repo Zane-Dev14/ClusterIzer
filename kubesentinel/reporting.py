@@ -106,7 +106,7 @@ def _build_architecture_section(state: InfraState) -> str:
 def _build_findings_section(
     title: str, findings: List[Dict[str, Any]], issue_type: str
 ) -> str:
-    """Build findings section (cost/security/failure) with evidence."""
+    """Build findings section (cost/security/failure) with evidence, remediation, and verification."""
     lines = [f"## {title}\n"]
 
     if not findings:
@@ -124,14 +124,44 @@ def _build_findings_section(
                 for finding in items[:5]:
                     lines.append(f"**{finding['resource']}**")
                     lines.append(f"- **Analysis:** {finding['analysis']}")
-                    lines.append(f"- **Recommendation:** {finding['recommendation']}")
-                    
+
+                    # Root Cause / Recommendation
+                    recommendation = finding.get("recommendation", "")
+                    if recommendation:
+                        lines.append(f"- **Recommendation:** {recommendation}")
+
+                    # Automated Remediation (commands that will be executed by Slack)
+                    remediation = finding.get("remediation", {})
+                    if isinstance(remediation, dict):
+                        commands = remediation.get("commands", [])
+                        automated = remediation.get("automated", False)
+                        if commands:
+                            status = "✅ Automated" if automated else "⚠️ Manual"
+                            lines.append(f"- **{status} Remediation:**")
+                            for cmd in commands:
+                                lines.append("  ```bash")
+                                lines.append(f"  {cmd}")
+                                lines.append("  ```")
+
+                    # Manual Verification (diagnostic commands - never executed)
+                    verification = finding.get("verification", {})
+                    if isinstance(verification, dict):
+                        v_commands = verification.get("commands", [])
+                        if v_commands:
+                            lines.append("- **Manual Verification (do not execute):**")
+                            for cmd in v_commands:
+                                lines.append("  ```bash")
+                                lines.append(f"  {cmd}")
+                                lines.append("  ```")
+
                     # Show verification status and evidence if available
                     if finding.get("verified"):
-                        lines.append(f"- ✅ **Verified:** {finding.get('evidence', 'Evidence gathered')[:200]}")
+                        lines.append(
+                            f"- ✅ **Verified:** {finding.get('evidence', 'Evidence gathered')[:200]}"
+                        )
                     elif "evidence" in finding:
                         lines.append(f"- ℹ️ **Status:** {finding['evidence']}")
-                    
+
                     lines.append("")
 
                 if len(items) > 5:
@@ -139,6 +169,10 @@ def _build_findings_section(
                         f"_(... and {len(items) - 5} more {severity} findings)_\n"
                     )
 
+    # Add footer note about execution
+    lines.append(
+        '**ℹ️ NOTE:** Only commands listed in the **Automated Remediation** section will be executed by the Slack "Run Fixes" button. Verification commands are diagnostic only (not executed).\n'
+    )
     lines.append("---\n")
     return "\n".join(lines)
 

@@ -17,10 +17,11 @@ from .agents import (
     failure_agent_node,
     cost_agent_node,
     security_agent_node,
-    synthesizer_node,
 )
+from .synthesizer import synthesizer_node
 from .persistence import PersistenceManager, drift_to_signals
 from .git_loader import load_git_desired_state
+from .runtime_tracer import get_tracer, reset_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,8 @@ def run_agents_parallel(state: InfraState) -> InfraState:
     if not run_targets:
         return state
 
+    # Phase N logging: Log which agents are actually running (consistency with planner)
+    logger.info(f"[executor] running_agents={sorted(run_targets.keys())}")
     logger.info("Running selected agents concurrently...")
     max_workers = min(len(run_targets), 3)  # Limit to 3 parallel workers
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -128,7 +131,35 @@ def build_runtime_graph() -> Any:
     """Build the complete LangGraph execution graph."""
     logger.info("Building runtime graph...")
     builder = StateGraph(InfraState)
-    for name, func in [
+
+    # Wrap nodes with tracing
+    def traced_node(node_func, node_name):
+        """Wrap a node function with tracing."""
+
+        def wrapper(state: InfraState) -> InfraState:
+            tracer = get_tracer()
+            tracer.enter_node(node_name)
+            try:
+                result = node_func(state)
+                # Log state summary
+                summary = {
+                    "findings_count": (
+                        len(result.get("failure_findings", []))
+                        + len(result.get("cost_findings", []))
+                        + len(result.get("security_findings", []))
+                    ),
+                    "signals_count": len(result.get("signals", [])),
+                }
+                tracer.exit_node(node_name, summary)
+                return result
+            except Exception as e:
+                logger.error(f"[{node_name}] Error: {e}")
+                tracer.exit_node(node_name)
+                raise
+
+        return wrapper
+
+    nodes = [
         ("scan_cluster", scan_cluster),
         ("load_desired_state", load_desired_state),
         ("build_graph", build_graph),
@@ -138,8 +169,11 @@ def build_runtime_graph() -> Any:
         ("planner", planner_node),
         ("run_agents_parallel", run_agents_parallel),
         ("synthesizer", synthesizer_node),
-    ]:
-        builder.add_node(name, func)
+    ]
+
+    for name, func in nodes:
+        builder.add_node(name, traced_node(func, name))
+
     for src, dst in [
         ("scan_cluster", "load_desired_state"),
         ("load_desired_state", "build_graph"),
@@ -181,7 +215,18 @@ def run_engine(
         user_query: The analysis query
         namespace: Optional Kubernetes namespace to scan
         agents: Optional list of agent names to override planner decision
+
+    Returns:
+        InfraState with analysis results
+
+    Side Effects:
+        - Saves runtime trace to runtime_traces/runtime_trace_*.json
+        - Saves execution graph to runtime_traces/runtime_graph_*.mmd
     """
+    # Reset tracer for new execution
+    reset_tracer()
+    tracer = get_tracer()
+
     logger.info(f"Starting engine: {user_query}")
     if namespace:
         logger.info(f"Namespace: {namespace}")
@@ -215,7 +260,28 @@ def run_engine(
             initial_state, {"configurable": {"thread_id": "main"}}
         )
         logger.info("Engine execution complete")
+
+        # Save traces automatically
+        trace_file = tracer.save_trace()
+        graph_file = tracer.save_graph()
+        logger.info(f"Runtime trace saved: {trace_file}")
+        logger.info(f"Runtime graph saved: {graph_file}")
+
+        # Log execution summary
+        logger.info("=" * 80)
+        logger.info("EXECUTION SUMMARY")
+        logger.info("=" * 80)
+        mermaid_graph = tracer.generate_mermaid_graph()
+        logger.info(f"\n{mermaid_graph}")
+        logger.info("=" * 80)
+
         return result
     except Exception as e:
         logger.error(f"Engine failed: {e}", exc_info=True)
+        # Still save trace even on failure
+        try:
+            tracer.save_trace()
+            tracer.save_graph()
+        except Exception as save_error:
+            logger.error(f"Failed to save trace after error: {save_error}")
         raise RuntimeError(f"Execution failed: {e}")

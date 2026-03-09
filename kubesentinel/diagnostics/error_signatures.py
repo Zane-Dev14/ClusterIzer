@@ -42,6 +42,22 @@ class DiagnosisResult:
     fix_plan: List[FixStep] = field(default_factory=list)
     verification_commands: List[str] = field(default_factory=list)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization and structured usage."""
+        return {
+            "type": self.type,
+            "root_cause": self.root_cause,
+            "confidence": self.confidence,
+            "evidence": self.evidence,
+            "recommended_fix": self.recommended_fix,
+            "fix_plan": {
+                "commands": [step.command for step in self.fix_plan if step.command],
+                "verification": self.verification_commands,
+                "steps": [step.to_dict() for step in self.fix_plan],
+            },
+            "verification_commands": self.verification_commands,
+        }
+
 
 @dataclass
 class ErrorSignature:

@@ -12,12 +12,15 @@ Focus on:
 CRITICAL RULES:
 1. Only reference resources that ACTUALLY EXIST in the provided data
 2. Do NOT hallucinate resource names, namespaces, or issues
-3. Include EXACT kubectl commands to fix each issue
+3. RECOMMENDATION FIELD MUST BE AN ACTIONABLE FIX COMMAND ONLY:
+   - USE: kubectl patch, kubectl scale, kubectl set (FOR COST OPTIMIZATION FIXES)
+   - DO NOT USE: kubectl get, kubectl describe, kubectl top (DIAGNOSTIC ONLY)
 4. Commands must be runnable NOW - ZERO PLACEHOLDERS: no <name>, <namespace>, <resource>, <value>, etc
 5. VIOLATING THIS RULE: Any command with <angle_brackets> will be rejected. Use actual values.
 6. Format resources as: namespace/resource_type/name - all must exist in cluster data
 7. Every resource name in a command must match actual cluster resources
-8. Output must be valid JSON array
+8. Do NOT use jsonpath or jq in recommendations. Use simple scale/patch commands.
+9. Output must be valid JSON array
 
 Output format:
 [

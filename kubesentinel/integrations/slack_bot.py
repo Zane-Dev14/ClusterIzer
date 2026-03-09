@@ -11,7 +11,9 @@ import os
 import re
 import logging
 import subprocess
-from typing import Any
+import shlex
+import time
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,6 +23,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from kubesentinel.runtime import run_engine
 from kubesentinel.reporting import build_report
 from kubesentinel.models import InfraState
+from kubesentinel import persistence
 
 # Load env variables from .env
 load_dotenv()
@@ -50,95 +53,294 @@ app = App(token=SLACK_BOT_TOKEN)
 # Cache last analysis per thread to avoid re-running on follow-ups
 _analysis_cache: dict[str, InfraState] = {}
 
+# Kubectl verb whitelists for safety enforcement
+ALLOWED_READ_VERBS = {
+    "get",
+    "describe",
+    "logs",
+    "top",
+    "explain",
+    "api-resources",
+    "api-versions",
+}
+ALLOWED_WRITE_VERBS = {"patch", "scale", "set", "rollout", "apply", "delete"}
+ALLOWED_VERBS = ALLOWED_READ_VERBS | ALLOWED_WRITE_VERBS
 
-def safe_kubectl_command(command: str, approval_token: str = "") -> str:
-    """Execute a kubectl command safely with hardened validation.
+# Shell injection rejection patterns
+SHELL_METACHARACTERS = {";", "|", "&", "$", "`", "(", ")", ">", "<", "\\", "\n"}
+
+# Get allowed approvers from environment
+ALLOWED_APPROVERS = (
+    set(os.getenv("KUBESENTINEL_OPS", "").split(","))
+    if os.getenv("KUBESENTINEL_OPS")
+    else None
+)
+
+# Emergency automation bypass flag
+FORCE_EXEC_ALLOWLIST = os.getenv("KUBESENTINEL_FORCE_EXEC_ALLOWLIST") == "1"
+
+
+def safe_kubectl_execute(
+    argv: List[str],
+    user_id: str = "slack_bot",
+    approver_user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute kubectl command safely with comprehensive validation and logging.
+
+    CRITICAL RULES:
+    1. No shell=True; subprocess.run with argv list only
+    2. Reject commands with shell metacharacters (;|&$()><\)
+    3. Validate verb against whitelist
+    4. Log all execution attempts (ok/error) to persistence
+    5. Enforce approval for write verbs (unless FORCE_EXEC overwrites)
 
     Args:
-        command: The kubectl command to run (without 'kubectl' prefix)
-        approval_token: Optional approval token for destructive commands (not yet implemented)
+        argv: List of command arguments (e.g., ["kubectl", "patch", "deployment", ...])
+        user_id: Slack user who triggered execution
+        approver_user_id: Slack user who approved (for audit trail)
 
     Returns:
-        Command output or error message
+        Dict with keys: ok (bool), stdout (str), stderr (str), elapsed_seconds (float)
     """
-    import shlex
-    
+    cmd_str = " ".join(argv)
+    start_time = time.time()
+
     try:
-        # Parse command safely
-        try:
-            args = shlex.split(command.strip())
-        except ValueError as e:
-            return f"❌ Invalid command syntax: {str(e)}"
-        
-        if not args:
-            return "❌ Empty command provided"
-        
-        verb = args[0].lower()
-        
-        # Define safe verbs (read-only)
-        safe_verbs = {"get", "describe", "logs", "top", "explain", "api-resources"}
-        
-        # Define write verbs that require more scrutiny
-        write_verbs = {"delete", "apply", "create", "patch", "replace", "scale", 
-                      "set", "rollout", "exec", "port-forward", "label", "annotate"}
-        
-        # Reject destructive verbs (too dangerous for Slack bot)
-        destructive_verbs = {"delete", "apply", "patch", "replace"}
-        
-        # Only allow specific safe commands
-        if verb not in safe_verbs and verb not in write_verbs:
-            return f"❌ Verb '{verb}' not allowed. Safe commands: {', '.join(sorted(safe_verbs))}"
-        
-        # Block destructive operations
-        if verb in destructive_verbs:
-            return f"❌ Destructive operations ({verb}) not allowed via Slack. Use kubectl CLI directly."
-        
-        # Block dangerous flags
-        dangerous_flags = {"--as", "--impersonate", "--username", "--password", "--token"}
-        for flag in dangerous_flags:
-            if any(arg.startswith(flag) for arg in args):
-                return f"❌ Flag '{flag}' not allowed (security risk)"
-        
-        # Block shell injection attempts
-        dangerous_chars = ["|", "&", ";", "$", "`", ">", "<", "\\", "\n"]
-        if any(char in command for char in dangerous_chars):
-            return "❌ Shell metacharacters not allowed"
-        
-        # Additional validation for write verbs
-        if verb in write_verbs:
-            if verb == "scale":
-                # Validate scale command format
-                if "--replicas" not in command:
-                    return "❌ Scale command requires --replicas flag"
-            elif verb == "set":
-                # Be careful with set commands
-                if not any(x in command.lower() for x in ["image", "resources", "env"]):
-                    return "❌ Only image, resources, and env subcommands allowed for 'set'"
-        
-        # Run kubectl command with timeout
-        result = subprocess.run(
-            ["kubectl"] + args,
-            capture_output=True,
-            text=True,
-            timeout=10,
+        # Step 1: Validate argv list
+        if not argv or not isinstance(argv, list):
+            result = {
+                "ok": False,
+                "stdout": "",
+                "stderr": "Invalid argv: must be non-empty list",
+                "elapsed_seconds": time.time() - start_time,
+            }
+            persistence.log_kubectl_execution(
+                user_id,
+                cmd_str,
+                False,
+                "",
+                str(result["stderr"]),
+                elapsed_seconds=(
+                    result["elapsed_seconds"]
+                    if isinstance(result["elapsed_seconds"], (int, float))
+                    else 0.0
+                ),
+                approver_user_id=approver_user_id,
+            )
+            return result
+
+        # Step 2: Reject if any arg contains shell metacharacters
+        for arg in argv:
+            if isinstance(arg, str):
+                for char in SHELL_METACHARACTERS:
+                    if char in arg:
+                        result = {
+                            "ok": False,
+                            "stdout": "",
+                            "stderr": f"Shell metacharacter '{char}' detected in argument: {arg}",
+                            "elapsed_seconds": time.time() - start_time,
+                        }
+                        persistence.log_kubectl_execution(
+                            user_id,
+                            cmd_str,
+                            False,
+                            "",
+                            str(result["stderr"]),
+                            elapsed_seconds=(
+                                result["elapsed_seconds"]
+                                if isinstance(result["elapsed_seconds"], (int, float))
+                                else 0.0
+                            ),
+                            approver_user_id=approver_user_id,
+                        )
+                        return result
+
+        # Step 3: Extract and validate verb
+        # Handle both "kubectl patch ..." and just "patch ..." formats
+        verb_idx = 1 if argv[0] == "kubectl" else 0
+        if verb_idx >= len(argv):
+            result = {
+                "ok": False,
+                "stdout": "",
+                "stderr": "No kubectl verb found",
+                "elapsed_seconds": time.time() - start_time,
+            }
+            persistence.log_kubectl_execution(
+                user_id,
+                cmd_str,
+                False,
+                "",
+                str(result["stderr"]),
+                elapsed_seconds=(
+                    result["elapsed_seconds"]
+                    if isinstance(result["elapsed_seconds"], (int, float))
+                    else 0.0
+                ),
+                approver_user_id=approver_user_id,
+            )
+            return result
+
+        verb = argv[verb_idx].lower()
+        if verb not in ALLOWED_VERBS:
+            result = {
+                "ok": False,
+                "stdout": "",
+                "stderr": f"Verb '{verb}' not allowed. Use: {', '.join(sorted(ALLOWED_VERBS))}",
+                "elapsed_seconds": time.time() - start_time,
+            }
+            persistence.log_kubectl_execution(
+                user_id,
+                cmd_str,
+                False,
+                "",
+                str(result["stderr"]),
+                elapsed_seconds=(
+                    result["elapsed_seconds"]
+                    if isinstance(result["elapsed_seconds"], (int, float))
+                    else 0.0
+                ),
+                approver_user_id=approver_user_id,
+            )
+            return result
+
+        # Step 4: Check if write verb and require approval (unless FORCE_EXEC)
+        if verb in ALLOWED_WRITE_VERBS and not FORCE_EXEC_ALLOWLIST:
+            if not approver_user_id:
+                result = {
+                    "ok": False,
+                    "stdout": "",
+                    "stderr": f"Write verb '{verb}' requires approval. Please approve in Slack first.",
+                    "elapsed_seconds": time.time() - start_time,
+                }
+                persistence.log_kubectl_execution(
+                    user_id,
+                    cmd_str,
+                    False,
+                    "",
+                    str(result["stderr"]),
+                    elapsed_seconds=(
+                        result["elapsed_seconds"]
+                        if isinstance(result["elapsed_seconds"], (int, float))
+                        else 0.0
+                    ),
+                    approver_user_id=None,
+                )
+                return result
+
+            # Check approver list if set
+            if ALLOWED_APPROVERS and approver_user_id not in ALLOWED_APPROVERS:
+                result = {
+                    "ok": False,
+                    "stdout": "",
+                    "stderr": f"User {approver_user_id} not in KUBESENTINEL_OPS allowlist",
+                    "elapsed_seconds": time.time() - start_time,
+                }
+                persistence.log_kubectl_execution(
+                    user_id,
+                    cmd_str,
+                    False,
+                    "",
+                    str(result["stderr"]),
+                    elapsed_seconds=(
+                        result["elapsed_seconds"]
+                        if isinstance(result["elapsed_seconds"], (int, float))
+                        else 0.0
+                    ),
+                    approver_user_id=approver_user_id,
+                )
+                return result
+
+        # Step 5: Execute with 60s timeout
+        logger.info(
+            f"[safe_kubectl] Executing: {cmd_str} (user={user_id}, approver={approver_user_id})"
         )
 
-        if result.returncode != 0:
-            error_msg = result.stderr[:500] if result.stderr else "Unknown error"
-            return f"❌ Command failed:\n```\n{error_msg}\n```"
+        proc_result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
 
-        output = result.stdout[:1000] if result.stdout else "Command completed (no output)"
-        
-        # Log successful execution for audit
-        logger.info(f"Slack kubectl: {verb} {' '.join(args[1:3])} (user via Slack bot)")
-        
-        return f"✅ Success:\n```\n{output}\n```"
+        elapsed = time.time() - start_time
+        ok = proc_result.returncode == 0
+        stdout = proc_result.stdout[:2000] if proc_result.stdout else ""
+        stderr = proc_result.stderr[:2000] if proc_result.stderr else ""
+
+        # Log execution
+        persistence.log_kubectl_execution(
+            user_id,
+            cmd_str,
+            ok,
+            stdout,
+            stderr,
+            elapsed_seconds=elapsed,
+            approver_user_id=approver_user_id,
+        )
+
+        return {
+            "ok": ok,
+            "stdout": stdout,
+            "stderr": stderr,
+            "elapsed_seconds": elapsed,
+        }
 
     except subprocess.TimeoutExpired:
-        return "❌ Command timed out (>10s)"
+        elapsed = time.time() - start_time
+        result = {
+            "ok": False,
+            "stdout": "",
+            "stderr": "Command timed out (>60s)",
+            "elapsed_seconds": elapsed,
+        }
+        persistence.log_kubectl_execution(
+            user_id,
+            cmd_str,
+            False,
+            "",
+            str(result["stderr"]),
+            elapsed_seconds=elapsed,
+            approver_user_id=approver_user_id,
+        )
+        return result
+
     except Exception as e:
-        logger.error(f"kubectl execution error: {e}")
-        return f"❌ Error: {str(e)}"
+        elapsed = time.time() - start_time
+        result = {
+            "ok": False,
+            "stdout": "",
+            "stderr": f"Execution error: {str(e)}",
+            "elapsed_seconds": elapsed,
+        }
+        logger.error(f"[safe_kubectl] Error: {e}", exc_info=True)
+        persistence.log_kubectl_execution(
+            user_id,
+            cmd_str,
+            False,
+            "",
+            str(result["stderr"]),
+            elapsed_seconds=elapsed,
+            approver_user_id=approver_user_id,
+        )
+        return result
+
+
+def safe_kubectl_command(command: str, approval_token: str = "") -> str:
+    """Legacy wrapper for safe_kubectl_execute (deprecated, for compatibility).
+
+    Parses command string and calls safe_kubectl_execute.
+    """
+    try:
+        argv = shlex.split("kubectl " + command.strip())
+        result = safe_kubectl_execute(argv, user_id="slack_command")
+
+        if result["ok"]:
+            return f"✅ Success:\n```\n{result['stdout']}\n```"
+        else:
+            return f"❌ Command failed:\n```\n{result['stderr']}\n```"
+    except ValueError as e:
+        return f"❌ Invalid command syntax: {str(e)}"
 
 
 def format_summary_blocks(state: InfraState) -> list:
@@ -626,7 +828,7 @@ def handle_view_report(ack: Any, body: dict, say: Any) -> None:
         content = report_path.read_text()
         # Convert to Slack blocks for better formatting
         blocks = _format_report_for_slack(content)
-        say(blocks=blocks, thread_ts=thread_ts)
+        say(blocks=blocks, thread_ts=thread_ts)  # type: ignore
     else:
         say(
             text="📄 Report not found. Make sure analysis has completed.",
@@ -635,15 +837,23 @@ def handle_view_report(ack: Any, body: dict, say: Any) -> None:
 
 
 @app.action("run_fixes_action")
-def handle_run_fixes(ack: Any, body: dict, say: Any) -> None:
-    """Handle Run Fixes button click."""
+def handle_run_fixes(ack: Any, body: dict, say: Any, client: Any) -> None:
+    """Handle Run Fixes button click.
+
+    CRITICAL RULES:
+    - Extract remediation commands ONLY from structured finding.remediation.commands
+    - Show approval buttons for write verbs (patch, scale, set, rollout, apply, delete)
+    - Never execute immediately; wait for explicit approval action
+    - Respect KUBESENTINEL_OPS allowlist if set
+    - Log all attempts to persistence
+    """
     ack()
 
-    # Get the thread
     message_ts = body["message"]["ts"]
     thread_ts = body["message"].get("thread_ts", message_ts)
+    user_id = body["user"]["id"]
 
-    logger.info(f"Run fixes button clicked for thread {thread_ts}")
+    logger.info(f"[run_fixes] button clicked by {user_id} in thread {thread_ts}")
 
     # Get cached analysis
     if thread_ts not in _analysis_cache:
@@ -655,7 +865,7 @@ def handle_run_fixes(ack: Any, body: dict, say: Any) -> None:
 
     state = _analysis_cache[thread_ts]
 
-    # Get recommendations from findings
+    # Collect all findings with remediation.commands
     all_findings = (
         state.get("failure_findings", [])
         + state.get("cost_findings", [])
@@ -664,110 +874,176 @@ def handle_run_fixes(ack: Any, body: dict, say: Any) -> None:
 
     if not all_findings:
         say(
-            text="✅ No specific fixes available for this analysis.",
+            text="✅ No issues detected in cluster. No remediation needed.",
             thread_ts=thread_ts,
         )
         return
 
-    # Build output with kubectl commands and execution results
-    output_blocks = [
+    # Extract remediation commands (only from structured field, never from report.md)
+    commands_to_execute = []  # List of (cmd, resource, finding_index)
+    no_automation_count = 0
+
+    for finding in all_findings:
+        resource = finding.get("resource", "unknown")
+        remediation = finding.get("remediation", {})
+
+        if not isinstance(remediation, dict):
+            remediation = {}
+
+        commands = remediation.get("commands", [])
+        automated = remediation.get("automated", False)
+
+        if not commands or not automated:
+            no_automation_count += 1
+            continue
+
+        # Add each command for approval
+        for cmd in commands[:1]:  # Max 1 per finding to limit Slack message complexity
+            commands_to_execute.append((cmd, resource))
+
+    if not commands_to_execute:
+        output_blocks: list = [  # type: ignore
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "📋 **No automated remediation available**\n\n"
+                    f"{no_automation_count} finding(s) require manual investigation or have no executable fix.\n"
+                    "Please review the findings in the report above.",
+                },
+            }
+        ]
+        say(blocks=output_blocks, thread_ts=thread_ts)  # type: ignore
+        return
+
+    # Build approval buttons for each command
+    output_blocks: list = [  # type: ignore
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "🔧 *Executing Recommended Fixes:*"},
+            "text": {
+                "type": "mrkdwn",
+                "text": "🔒 **Remediation Requires Approval**\n\nReview each command and click 'Approve & Execute' to proceed:",
+            },
         },
         {"type": "divider"},
     ]
 
-    executed_count = 0
-    kubectl_commands_run = []
-
-    # Extract all kubectl commands from recommendations
-    for finding in all_findings[:5]:  # Process up to 5 findings
-        recommendation = finding.get("recommendation", "")
-        if not recommendation:
-            continue
-
-        commands = extract_kubectl_commands(recommendation)
-        if commands:
-            for cmd in commands[:2]:  # Max 2 commands per finding
-                logger.info(f"Running kubectl command: {cmd}")
-                result = safe_kubectl_command(cmd)
-                kubectl_commands_run.append((cmd, result))
-                executed_count += 1
-
-    # If no commands found in findings, try to extract from the report
-    if not kubectl_commands_run:
-        logger.info("No kubectl commands in findings, checking report.md...")
-        report_path = Path("report.md")
-        if report_path.exists():
-            report_content = report_path.read_text()
-            # Extract all unique kubectl commands from the report
-            all_commands_from_report: dict[str, tuple[str, str]] = {}
-            for line in report_content.split("\n"):
-                if "kubectl" in line.lower():
-                    commands = extract_kubectl_commands(line)
-                    for cmd in commands:
-                        if cmd not in all_commands_from_report:
-                            # Try to execute but limit to 5 commands total
-                            if len(all_commands_from_report) < 5:
-                                logger.info(f"Executing from report: {cmd}")
-                                result = safe_kubectl_command(cmd)
-                                all_commands_from_report[cmd] = (cmd, result)
-                                kubectl_commands_run.append((cmd, result))
-
-            # Use collected commands if any were found
-            if kubectl_commands_run:
-                logger.info(f"Found {len(kubectl_commands_run)} commands from report")
-
-    # If we found and executed kubectl commands, show them
-    if kubectl_commands_run:
-        output_blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*✅ kubectl Commands Executed:*"},
-            }
-        )
-
-        for cmd, result in kubectl_commands_run:
-            cmd_text = f"\\`kubectl {cmd}\\`"
-            output_blocks.append(
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"{cmd_text}\n{result}"},
-                }
-            )
-            output_blocks.append({"type": "divider"})
-
-        say(blocks=output_blocks, thread_ts=thread_ts)
-    else:
-        # Show recommendation text at the end
+    for cmd, resource in commands_to_execute:
+        # Display command for review
+        cmd_display = cmd if len(cmd) < 80 else cmd[:77] + "..."
         output_blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*📋 Recommended Commands:*",
+                    "text": f"📦 **Resource:** `{resource}`\n`{cmd_display}`",
                 },
             }
         )
 
-        rec_text_lines = []
-        for i, finding in enumerate(all_findings[:3], 1):
-            rec = finding.get("recommendation", "")
-            if rec:
-                # Limit length for Slack
-                rec_preview = rec[:300] + "..." if len(rec) > 300 else rec
-                rec_text_lines.append(f"{i}. {rec_preview}")
+        # Add approval button with command as value
+        output_blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ Approve & Execute"},
+                        "action_id": "approve_execute_action",
+                        "value": f"{thread_ts}|{cmd}",
+                        "style": "primary",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "❌ Skip"},
+                        "action_id": "skip_execute_action",
+                        "value": f"{thread_ts}|{cmd}",
+                    },
+                ],
+            }
+        )
+        output_blocks.append({"type": "divider"})
 
-        if rec_text_lines:
-            output_blocks.append(
+    output_blocks.append(
+        {
+            "type": "context",
+            "elements": [
                 {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "\n\n".join(rec_text_lines)},
+                    "type": "mrkdwn",
+                    "text": "⚠️ Each command will be validated, executed with 60s timeout, and fully logged.",
                 }
-            )
+            ],
+        }
+    )
 
-        say(blocks=output_blocks, thread_ts=thread_ts)
+    say(blocks=output_blocks, thread_ts=thread_ts)  # type: ignore
+
+
+@app.action("approve_execute_action")
+def handle_approve_execute(ack: Any, body: dict, say: Any) -> None:
+    """Handle 'Approve & Execute' button click.
+
+    Re-validates command, checks approval list, executes, and logs result.
+    """
+    ack()
+
+    user_id = body["user"]["id"]
+    value = body["actions"][0].get("value", "")
+
+    if "|" not in value:
+        logger.warning(f"[approve_execute] Invalid value format: {value}")
+        say(text="❌ Internal error: invalid action value")
+        return
+
+    thread_ts, cmd = value.split("|", 1)
+    message_ts = body["message"]["ts"]
+    thread_ts_msg = body["message"].get("thread_ts", message_ts)
+
+    logger.info(
+        f"[approve_execute] user={user_id} thread={thread_ts_msg} cmd={cmd[:80]}"
+    )
+
+    # Parse command to argv
+    try:
+        argv = shlex.split("kubectl " + cmd.strip())
+    except ValueError as e:
+        say(
+            text=f"❌ Command parse error: {str(e)}",
+            thread_ts=thread_ts_msg,
+        )
+        return
+
+    # Execute with approval tracking
+    result = safe_kubectl_execute(argv, user_id=user_id, approver_user_id=user_id)
+
+    # Format response
+    if result["ok"]:
+        output = (
+            f"✅ **Success**\n```\n{result['stdout'][:500]}\n```"
+            if result["stdout"]
+            else "✅ **Success** (no output)"
+        )
+    else:
+        output = f"❌ **Failed**\n```\n{result['stderr'][:500]}\n```"
+
+    output += f"\n⏱️ Executed in {result['elapsed_seconds']:.2f}s"
+
+    say(
+        text=output,
+        thread_ts=thread_ts_msg,
+    )
+
+
+@app.action("skip_execute_action")
+def handle_skip_execute(ack: Any, body: dict, say: Any) -> None:
+    """Handle 'Skip' button click."""
+    ack()
+
+    user_id = body["user"]["id"]
+    message_ts = body["message"]["ts"]
+    thread_ts = body["message"].get("thread_ts", message_ts)
+
+    say(text="⏭️ Skipped", thread_ts=thread_ts)
 
 
 @app.event("app_mention")
@@ -831,7 +1107,7 @@ def handle_app_mention(body: dict, say: Any, ack: Any) -> None:
     blocks = format_summary_blocks(state)
 
     # Reply in thread with blocks
-    say(blocks=blocks, thread_ts=thread_ts)
+    say(blocks=blocks, thread_ts=thread_ts)  # type: ignore
 
 
 @app.event("message")
@@ -902,7 +1178,7 @@ def handle_message(body: dict, say: Any, ack: Any) -> None:
     blocks = format_summary_blocks(state)
 
     # Reply in thread with blocks
-    say(blocks=blocks, thread_ts=thread_ts)
+    say(blocks=blocks, thread_ts=thread_ts)  # type: ignore
 
 
 def main() -> None:

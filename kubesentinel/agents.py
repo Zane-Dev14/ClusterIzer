@@ -4,14 +4,13 @@ import os
 import re
 import shlex
 import subprocess
-from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 
@@ -32,6 +31,9 @@ VERBOSE = os.getenv("KUBESENTINEL_VERBOSE_AGENTS") == "1"
 
 # Expected JSON schema for agent findings
 AGENT_FINDING_SCHEMA = ["resource", "severity", "analysis", "recommendation"]
+
+# Required fields for valid findings (subset of schema; remediation/verification added during normalization)
+AGENT_FINDING_REQUIRED = ["resource", "severity", "analysis"]
 
 # Kubectl safe verbs (read-only operations)
 KUBECTL_SAFE_VERBS = {
@@ -62,6 +64,34 @@ KUBECTL_WRITE_VERBS = {
     "label",
     "annotate",
 }
+
+# DIAGNOSTIC VERBS (NEVER in recommendations, only internal evidence gathering)
+KUBECTL_DIAGNOSTIC_VERBS = {
+    "get",
+    "describe",
+    "logs",
+    "top",
+    "exec",
+    "explain",
+    "api-resources",
+}
+
+# REMEDIATION VERBS (ONLY allowed in recommendations)
+# These are the only kubectl commands that should appear in final recommendations
+REMEDIATION_VERB_WHITELIST = {
+    "patch",  # Modify resource fields (most common fix)
+    "scale",  # Change replica count
+    "set",  # Set image, resources, env (subcommand validation required)
+    "rollout",  # Restart deployment/statefulset (subcommand: restart)
+    "delete",  # Remove resource (only when explicitly verified safe)
+    "apply",  # Apply configuration
+}
+
+# Valid subcommands for "set" verb in remediation
+SET_REMEDIATION_SUBCOMMANDS = {"image", "resources", "env", "serviceaccount"}
+
+# Valid subcommands for "rollout" verb in remediation
+ROLLOUT_REMEDIATION_SUBCOMMANDS = {"restart", "undo", "pause", "resume"}
 
 
 class AgentTimeoutError(Exception):
@@ -184,22 +214,39 @@ def make_tools(state: InfraState) -> List:
         try:
             # Try to get logs from previous (crashed) container first
             result = subprocess.run(
-                ["kubectl", "logs", f"{pod_name}", "-n", namespace, "--previous", f"--tail={tail_lines}"],
+                [
+                    "kubectl",
+                    "logs",
+                    f"{pod_name}",
+                    "-n",
+                    namespace,
+                    "--previous",
+                    f"--tail={tail_lines}",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
             if result.returncode == 0:
                 return result.stdout or "No logs available"
-            
+
             # Fallback: get logs from current container
             result = subprocess.run(
-                ["kubectl", "logs", f"{pod_name}", "-n", namespace, f"--tail={tail_lines}"],
+                [
+                    "kubectl",
+                    "logs",
+                    f"{pod_name}",
+                    "-n",
+                    namespace,
+                    f"--tail={tail_lines}",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
+            return (
+                result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
+            )
         except subprocess.TimeoutExpired:
             return "Error: Log fetch timed out after 10 seconds"
         except Exception as e:
@@ -219,11 +266,11 @@ def make_tools(state: InfraState) -> List:
         """
         if not resource_type or not name:
             return "Error: resource_type and name are required"
-        
+
         cmd = ["kubectl", "get", resource_type, name, "-o", "yaml"]
         if namespace:
             cmd.extend(["-n", namespace])
-        
+
         try:
             result = subprocess.run(
                 cmd,
@@ -231,7 +278,9 @@ def make_tools(state: InfraState) -> List:
                 text=True,
                 timeout=10,
             )
-            return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
+            return (
+                result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
+            )
         except subprocess.TimeoutExpired:
             return "Error: Get resource timed out after 10 seconds"
         except Exception as e:
@@ -251,16 +300,16 @@ def make_tools(state: InfraState) -> List:
         """
         if not command_args or not command_args.strip():
             return "Error: command_args cannot be empty"
-        
+
         # Parse command safely
         try:
             args = shlex.split(command_args.strip())
         except ValueError as e:
             return f"Error: Invalid command syntax: {str(e)}"
-        
+
         if not args:
             return "Error: No command provided"
-        
+
         # Validate verb is safe
         verb = args[0].lower()
         if verb not in KUBECTL_SAFE_VERBS:
@@ -268,12 +317,12 @@ def make_tools(state: InfraState) -> List:
                 f"Error: Verb '{verb}' not allowed. "
                 f"Only safe read-only verbs permitted: {', '.join(sorted(KUBECTL_SAFE_VERBS))}"
             )
-        
+
         # Reject shell metacharacters for safety
         dangerous_chars = ["|", "&", ";", "$", "`", ">", "<", "\n", "\\"]
         if any(char in command_args for char in dangerous_chars):
             return "Error: Shell metacharacters not allowed in kubectl commands"
-        
+
         # Execute kubectl command
         try:
             result = subprocess.run(
@@ -353,7 +402,7 @@ def planner_node(state: InfraState) -> InfraState:
     }
     if any(w in expanded_tokens for w in architecture_keywords):
         agents = ["failure_agent", "cost_agent", "security_agent"]
-        logger.info(f"Planner selected agents: {agents} (architecture query)")
+        logger.info(f"[planner] selected_agents={agents} (architecture query)")
         state["planner_decision"] = agents
         state["planner_metadata"] = {
             "tokens": sorted(tokens),
@@ -442,7 +491,7 @@ def planner_node(state: InfraState) -> InfraState:
             seen.add(agent)
             unique_agents.append(agent)
 
-    logger.info(f"Planner selected agents: {unique_agents}")
+    logger.info(f"[planner] selected_agents={unique_agents}")
     state["planner_decision"] = unique_agents
     state["planner_metadata"] = {
         "tokens": sorted(tokens),
@@ -542,7 +591,13 @@ def _verify_findings_with_evidence(
                                 diagnose_crash_logs,
                             )
 
-                            diagnosis = diagnose_crash_logs(result.stdout)
+                            # pod_name=resource_name, container="app" (default), namespace is available
+                            diagnosis = diagnose_crash_logs(
+                                log_text=result.stdout,
+                                pod_name=resource_name,
+                                namespace=namespace,
+                                container="app",  # Default container name; could be extracted from pod spec
+                            )
                             if diagnosis:
                                 evidence.append(
                                     f"Root cause: {diagnosis.root_cause} (confidence: {diagnosis.confidence})"
@@ -620,11 +675,13 @@ def failure_agent_node(state: InfraState) -> InfraState:
             )
 
         findings = run_llm()
-        
+
         # Verify findings with actual evidence (ReAct loop)
         if findings:
-            findings = _verify_findings_with_evidence(findings, state, max_verifications=3)
-        
+            findings = _verify_findings_with_evidence(
+                findings, state, max_verifications=3
+            )
+
         state["failure_findings"] = findings[:MAX_FINDINGS]
     except AgentTimeoutError:
         logger.warning("Failure agent timeout - using deterministic fallback")
@@ -657,11 +714,13 @@ def cost_agent_node(state: InfraState) -> InfraState:
             return _run_agent(state, "cost_agent", "cost_agent.txt", "cost")
 
         findings = run_llm()
-        
+
         # Verify findings with actual evidence (ReAct loop)
         if findings:
-            findings = _verify_findings_with_evidence(findings, state, max_verifications=3)
-        
+            findings = _verify_findings_with_evidence(
+                findings, state, max_verifications=3
+            )
+
         state["cost_findings"] = findings[:MAX_FINDINGS]
     except AgentTimeoutError:
         logger.warning("Cost agent timeout - using deterministic fallback")
@@ -694,11 +753,13 @@ def security_agent_node(state: InfraState) -> InfraState:
             return _run_agent(state, "security_agent", "security_agent.txt", "security")
 
         findings = run_llm()
-        
+
         # Verify findings with actual evidence (ReAct loop)
         if findings:
-            findings = _verify_findings_with_evidence(findings, state, max_verifications=3)
-        
+            findings = _verify_findings_with_evidence(
+                findings, state, max_verifications=3
+            )
+
         state["security_findings"] = findings[:MAX_FINDINGS]
     except AgentTimeoutError:
         logger.warning("Security agent timeout - using deterministic fallback")
@@ -1046,10 +1107,9 @@ def _extract_json_findings(
 
     # Log to persistence for debugging
     try:
-        from .runtime import get_persistence_manager
+        from . import persistence
 
-        persistence = get_persistence_manager()
-        persistence.log_agent_output(agent_name, content, error="JSON extraction failed")
+        persistence.log_agent_output(agent_name, content)
     except Exception as e:
         logger.warning(f"Failed to log agent output to persistence: {e}")
 
@@ -1059,14 +1119,24 @@ def _extract_json_findings(
 def _validate_findings(
     findings: List[Any], agent_name: str = "unknown"
 ) -> List[Dict[str, Any]]:
-    """Validate findings against AGENT_FINDING_SCHEMA.
+    """Validate findings against AGENT_FINDING_SCHEMA with strict recommendation validation.
+
+    CRITICAL RULE: Recommendations must contain only remediation commands, never diagnostic commands.
+    - Diagnostic verbs (get, describe, logs, top, exec) → for internal evidence gathering only
+    - Remediation verbs (patch, scale, set, rollout, delete, apply) → only in final recommendations
+
+    Findings are normalized with remediation and verification fields:
+    - remediation.commands: structured list of kubectl write verbs (may be empty)
+    - remediation.automated: whether these can be executed without human approval
+    - verification.commands: diagnostic verbs (kubectl get, describe, logs) — never executed
+    - verification.notes: optional notes for manual verification
 
     Args:
         findings: List of candidate finding dicts
         agent_name: Name of agent for logging
 
     Returns:
-        List of valid findings (empty if none valid)
+        List of valid findings with normalized remediation/verification fields
     """
     if not isinstance(findings, list):
         logger.warning(f"{agent_name}: Findings is not a list: {type(findings)}")
@@ -1080,12 +1150,61 @@ def _validate_findings(
             )
             continue
 
-        missing = [k for k in AGENT_FINDING_SCHEMA if k not in finding]
+        missing = [k for k in AGENT_FINDING_REQUIRED if k not in finding]
         if missing:
             logger.warning(
                 f"{agent_name}: Finding {idx} missing required fields: {missing}"
             )
             continue
+
+        # Normalize finding with empty remediation and verification fields
+        finding.setdefault(
+            "remediation",
+            {
+                "commands": [],
+                "automated": False,
+                "reason": None,
+            },
+        )
+        finding.setdefault(
+            "verification",
+            {
+                "commands": [],
+                "notes": None,
+            },
+        )
+
+        # STRICT VALIDATION: Recommendations must be actionable FIX commands, not diagnostic
+        recommendation = finding.get("recommendation", "").strip()
+        if recommendation:
+            # Validate kubectl command if present
+            if "kubectl" in recommendation.lower():
+                validation_error = _validate_remediation_command(
+                    recommendation, agent_name, idx
+                )
+                if validation_error:
+                    logger.warning(validation_error)
+                    continue
+
+                # If recommendation is valid, try to map it to remediation.commands
+                try:
+                    parts = shlex.split(recommendation)
+                    if parts:
+                        verb = (
+                            parts[0]
+                            if parts[0] == "kubectl" and len(parts) > 1
+                            else parts[0]
+                        )
+                        # Only add to remediation if it's a write verb (not diagnostic)
+                        if verb in REMEDIATION_VERB_WHITELIST:
+                            finding["remediation"]["commands"] = [recommendation]
+                            finding["remediation"]["automated"] = True
+                            finding["remediation"]["reason"] = (
+                                "Valid kubectl remediation command"
+                            )
+                except (ValueError, IndexError):
+                    # shlex.split failed; just skip adding to commands but don't fail validation
+                    pass
 
         valid.append(finding)
 
@@ -1095,157 +1214,78 @@ def _validate_findings(
     return valid
 
 
-def _synthesize_strategic_summary(state: InfraState) -> str:
-    """Generate deterministic strategic summary from findings (no LLM).
+def _validate_remediation_command(cmd: str, agent_name: str, finding_idx: int) -> str:
+    """Validate that a command contains only remediation verbs, not diagnostic verbs.
 
-    Produces structured output based on verified findings and risk assessment.
-    
+    CRITICAL: This prevents agents from outputting kubectl get/describe/logs as "fixes".
+
     Args:
-        state: Current infrastructure state with findings
-        
+        cmd: The recommendation command string
+        agent_name: Agent name for logging
+        finding_idx: Finding index for logging
+
     Returns:
-        Strategic summary string
+        Error message if invalid, empty string if valid
     """
-    failure = state.get("failure_findings", [])
-    cost = state.get("cost_findings", [])
-    security = state.get("security_findings", [])
-    risk = state.get("risk_score", {})
-    snapshot = state.get("cluster_snapshot", {})
+    cmd_lower = cmd.lower()
 
-    lines = []
-    lines.append(f"# Strategic Summary")
-    lines.append("")
-    
-    # Risk assessment header
-    risk_score = risk.get("score", 0)
-    risk_grade = risk.get("grade", "N/A")
-    lines.append(f"## Risk Assessment: {risk_score}/100 ({risk_grade})")
-    lines.append(f"- Cluster Size: {len(snapshot.get('nodes', []))} nodes, {len(snapshot.get('pods', []))} pods")
-    lines.append(f"- Total Signals: {risk.get('signal_count', 0)}")
-    lines.append(f"- Agents Executed: failure_agent, cost_agent (top-2 selection)")
-    lines.append("")
+    # Extract verb after "kubectl"
+    words = cmd_lower.split()
 
-    # Critical findings
-    critical_findings = []
-    for finding_list in [failure, cost, security]:
-        critical_findings.extend([f for f in finding_list if f.get("severity") == "critical"])
-
-    if critical_findings:
-        lines.append(f"## Critical Issues ({len(critical_findings)} found)")
-        for finding in critical_findings[:5]:  # Top 5 critical
-            lines.append(f"- **{finding.get('resource')}**: {finding.get('analysis')}")
-            if finding.get("verified"):
-                lines.append(f"  Evidence: {finding.get('evidence', 'N/A')[:100]}")
-            lines.append(f"  Action: {finding.get('recommendation')}")
-            lines.append("")
-    else:
-        lines.append("## No Critical Issues Detected")
-        lines.append("")
-
-    # Category breakdown
-    lines.append("## Findings by Category")
-    lines.append(f"- **Reliability**: {len(failure)} findings")
-    if failure:
-        high_reliability = [f for f in failure if f.get("severity") in ("critical", "high")]
-        if high_reliability:
-            lines.append(f"  - {len(high_reliability)} high-severity findings require immediate attention")
-
-    lines.append(f"- **Cost**: {len(cost)} findings")
-    if cost:
-        savings_potential = len([f for f in cost if f.get("severity") in ("high", "critical")])
-        if savings_potential:
-            lines.append(f"  - {savings_potential} optimization opportunities identified")
-
-    lines.append(f"- **Security**: {len(security)} findings")
-    if security:
-        security_critical = [f for f in security if f.get("severity") == "critical"]
-        if security_critical:
-            lines.append(f"  - {len(security_critical)} critical vulnerabilities need remediation")
-
-    lines.append("")
-
-    # Recommendations
-    if failure or cost or security:
-        lines.append("## Recommended Actions (Prioritized)")
-        idx = 1
-        
-        # Critical findings first
-        for finding in critical_findings[:3]:
-            lines.append(f"{idx}. **{finding.get('resource', 'Cluster')}** ({finding.get('severity')})")
-            lines.append(f"   - Issue: {finding.get('analysis')}")
-            lines.append(f"   - Action: {finding.get('recommendation')}")
-            if finding.get("verified") and finding.get("evidence"):
-                lines.append(f"   - Evidence: {finding.get('evidence')[:100]}")
-            idx += 1
-        
-        # High-severity findings
-        high_findings = []
-        for finding_list in [failure, cost, security]:
-            high_findings.extend([f for f in finding_list if f.get("severity") == "high"])
-        
-        for finding in high_findings[:2]:
-            lines.append(f"{idx}. **{finding.get('resource', 'Cluster')}** ({finding.get('severity')})")
-            lines.append(f"   - Issue: {finding.get('analysis')}")
-            lines.append(f"   - Action: {finding.get('recommendation')}")
-            idx += 1
-    
-    lines.append("")
-    lines.append("## Verification Status")
-    verified_count = sum(1 for f in failure + cost + security if f.get("verified"))
-    total_count = len(failure) + len(cost) + len(security)
-    lines.append(f"- {verified_count}/{total_count} findings verified with cluster evidence")
-    
-    lines.append("")
-    lines.append("---")
-    lines.append(f"*Generated by KubeSentinel at {datetime.utcnow().isoformat()}*")
-
-    return "\n".join(lines)
-
-
-def synthesizer_node(state: InfraState) -> InfraState:
-    """Strategic synthesis agent - produces executive summary."""
-    logger.info("Running synthesizer...")
-    
-    # Use deterministic synthesis instead of LLM
     try:
-        # First try deterministic summary (no LLM, faster, more reliable)
-        summary = _synthesize_strategic_summary(state)
-        
-        # Optionally, enhance with LLM if available (for richer formatting)
-        # but don't fail if LLM unavailable
-        try:
-            system_prompt = (PROMPT_DIR / "synthesizer.txt").read_text()
-            context = f"Create a strategic summary based on this analysis:\n\n{summary}"
-            
-            response = LLM.invoke(
-                [SystemMessage(content=system_prompt), HumanMessage(content=context)]
+        idx_kubectl = words.index("kubectl")
+        if idx_kubectl + 1 >= len(words):
+            return f"{agent_name}: Finding {finding_idx} - recommendation missing verb after 'kubectl'"
+
+        verb = words[idx_kubectl + 1]
+
+        # FIRST CHECK: Block diagnostic verbs (these are NEVER allowed in recommendations)
+        if verb in KUBECTL_DIAGNOSTIC_VERBS:
+            return (
+                f"{agent_name}: Finding {finding_idx} - recommendation contains DIAGNOSTIC verb '{verb}'. "
+                f"Diagnostic commands (get, describe, logs, top, exec) may only be used internally for evidence gathering. "
+                f"Recommendations must contain only remediation verbs: {', '.join(sorted(REMEDIATION_VERB_WHITELIST))}"
             )
-            llm_summary = response.content if hasattr(response, "content") else str(response)
-            llm_summary = str(llm_summary) if not isinstance(llm_summary, str) else llm_summary
-            
-            # Check for placeholders (indicates hallucination)
-            placeholder_pattern = r"<[a-z\-_]+>"
-            placeholders_found = re.findall(placeholder_pattern, llm_summary, re.IGNORECASE)
-            if placeholders_found:
-                logger.warning(
-                    f"LLM output contains placeholders: {set(placeholders_found)} - using deterministic summary instead"
+
+        # SECOND CHECK: Validate verb is in remediation whitelist
+        if verb not in REMEDIATION_VERB_WHITELIST:
+            return (
+                f"{agent_name}: Finding {finding_idx} - recommendation contains non-remediation verb '{verb}'. "
+                f"Allowed remediation verbs: {', '.join(sorted(REMEDIATION_VERB_WHITELIST))}"
+            )
+
+        # THIRD CHECK: Validate subcommands for multi-part verbs
+        if verb == "set" and idx_kubectl + 2 < len(words):
+            subcommand = words[idx_kubectl + 2]
+            if subcommand not in SET_REMEDIATION_SUBCOMMANDS:
+                return (
+                    f"{agent_name}: Finding {finding_idx} - 'set {subcommand}' not allowed. "
+                    f"Valid: {', '.join(sorted(SET_REMEDIATION_SUBCOMMANDS))}"
                 )
-                summary = summary  # Use deterministic version
-            else:
-                # LLM enhanced successfully
-                summary = llm_summary if llm_summary else summary
-                logger.debug("LLM enhanced strategic summary")
-        except Exception as e:
-            logger.debug(f"LLM enhancement skipped: {e} - using deterministic summary")
-            # Fallback to deterministic summary
-            pass
-        
-        state["strategic_summary"] = (
-            summary[:8000] + "\n[Summary truncated]" if len(summary) > 8000 else summary
-        )
-        logger.info("Synthesizer complete")
-    except Exception as e:
-        logger.error(f"Synthesizer error: {e}")
-        state["strategic_summary"] = "Error generating strategic summary."
-    
-    return state
+
+        if verb == "rollout" and idx_kubectl + 2 < len(words):
+            subcommand = words[idx_kubectl + 2]
+            if subcommand not in ROLLOUT_REMEDIATION_SUBCOMMANDS:
+                return (
+                    f"{agent_name}: Finding {finding_idx} - 'rollout {subcommand}' not allowed. "
+                    f"Valid: {', '.join(sorted(ROLLOUT_REMEDIATION_SUBCOMMANDS))}"
+                )
+
+        # FOURTH CHECK: Verify quotes are balanced (prevents jq/jsonpath injection)
+        if cmd.count("'") % 2 != 0:
+            return (
+                f"{agent_name}: Finding {finding_idx} - recommendation has unclosed single quotes. "
+                f"This suggests a malformed jq or jsonpath expression."
+            )
+        if cmd.count('"') % 2 != 0:
+            return (
+                f"{agent_name}: Finding {finding_idx} - recommendation has unclosed double quotes. "
+                f"This suggests a malformed jq or jsonpath expression."
+            )
+
+        # All checks passed
+        return ""
+
+    except ValueError:
+        # "kubectl" not found in command (shouldn't happen, caller checks this)
+        return ""
