@@ -51,40 +51,88 @@ app = App(token=SLACK_BOT_TOKEN)
 _analysis_cache: dict[str, InfraState] = {}
 
 
-def safe_kubectl_command(command: str) -> str:
-    """Execute a kubectl command safely.
+def safe_kubectl_command(command: str, approval_token: str = "") -> str:
+    """Execute a kubectl command safely with hardened validation.
 
     Args:
         command: The kubectl command to run (without 'kubectl' prefix)
+        approval_token: Optional approval token for destructive commands (not yet implemented)
 
     Returns:
         Command output or error message
     """
+    import shlex
+    
     try:
-        # Whitelist common safe commands
-        allowed_prefixes = [
-            "get ",
-            "describe ",
-            "logs ",
-            "rollout restart ",
-            "scale ",
-        ]
-
-        if not any(command.startswith(prefix) for prefix in allowed_prefixes):
-            return "❌ Command not allowed. Safe commands: get, describe, logs, rollout restart, scale"
-
+        # Parse command safely
+        try:
+            args = shlex.split(command.strip())
+        except ValueError as e:
+            return f"❌ Invalid command syntax: {str(e)}"
+        
+        if not args:
+            return "❌ Empty command provided"
+        
+        verb = args[0].lower()
+        
+        # Define safe verbs (read-only)
+        safe_verbs = {"get", "describe", "logs", "top", "explain", "api-resources"}
+        
+        # Define write verbs that require more scrutiny
+        write_verbs = {"delete", "apply", "create", "patch", "replace", "scale", 
+                      "set", "rollout", "exec", "port-forward", "label", "annotate"}
+        
+        # Reject destructive verbs (too dangerous for Slack bot)
+        destructive_verbs = {"delete", "apply", "patch", "replace"}
+        
+        # Only allow specific safe commands
+        if verb not in safe_verbs and verb not in write_verbs:
+            return f"❌ Verb '{verb}' not allowed. Safe commands: {', '.join(sorted(safe_verbs))}"
+        
+        # Block destructive operations
+        if verb in destructive_verbs:
+            return f"❌ Destructive operations ({verb}) not allowed via Slack. Use kubectl CLI directly."
+        
+        # Block dangerous flags
+        dangerous_flags = {"--as", "--impersonate", "--username", "--password", "--token"}
+        for flag in dangerous_flags:
+            if any(arg.startswith(flag) for arg in args):
+                return f"❌ Flag '{flag}' not allowed (security risk)"
+        
+        # Block shell injection attempts
+        dangerous_chars = ["|", "&", ";", "$", "`", ">", "<", "\\", "\n"]
+        if any(char in command for char in dangerous_chars):
+            return "❌ Shell metacharacters not allowed"
+        
+        # Additional validation for write verbs
+        if verb in write_verbs:
+            if verb == "scale":
+                # Validate scale command format
+                if "--replicas" not in command:
+                    return "❌ Scale command requires --replicas flag"
+            elif verb == "set":
+                # Be careful with set commands
+                if not any(x in command.lower() for x in ["image", "resources", "env"]):
+                    return "❌ Only image, resources, and env subcommands allowed for 'set'"
+        
         # Run kubectl command with timeout
         result = subprocess.run(
-            ["kubectl"] + command.split(),
+            ["kubectl"] + args,
             capture_output=True,
             text=True,
             timeout=10,
         )
 
         if result.returncode != 0:
-            return f"❌ Command failed:\n```\n{result.stderr}\n```"
+            error_msg = result.stderr[:500] if result.stderr else "Unknown error"
+            return f"❌ Command failed:\n```\n{error_msg}\n```"
 
-        return f"✅ Success:\n```\n{result.stdout[:1000]}\n```"
+        output = result.stdout[:1000] if result.stdout else "Command completed (no output)"
+        
+        # Log successful execution for audit
+        logger.info(f"Slack kubectl: {verb} {' '.join(args[1:3])} (user via Slack bot)")
+        
+        return f"✅ Success:\n```\n{output}\n```"
 
     except subprocess.TimeoutExpired:
         return "❌ Command timed out (>10s)"

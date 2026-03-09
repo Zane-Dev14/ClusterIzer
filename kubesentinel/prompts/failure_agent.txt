@@ -26,8 +26,7 @@ Output format:
     "resource": "namespace/resource_type/name",
     "severity": "critical|high|medium|low",
     "analysis": "What is broken and why",
-    "first_fix": "Immediate diagnostic or remediation command",
-    "follow_up": "Optional: Second command if first doesn't fix it"
+    "recommendation": "Exact kubectl command to diagnose or fix (NO placeholders)"
   }
 ]
 

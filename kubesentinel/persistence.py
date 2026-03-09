@@ -146,6 +146,24 @@ class PersistenceManager:
             ON drifts(resource_key, drift_type)"""
             )
 
+            # Agent output log for parse failures and debugging
+            self.conn.execute(
+                """
+            CREATE TABLE IF NOT EXISTS agent_outputs (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                raw_output TEXT,
+                error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+            )
+            self.conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent
+            ON agent_outputs(agent_name, timestamp DESC)"""
+            )
+
     def save_snapshot(self, state: Dict[str, Any]) -> str:
         """Save cluster snapshot with hash-based deduplication."""
         timestamp = datetime.utcnow().isoformat()
@@ -341,6 +359,30 @@ class PersistenceManager:
             (window,),
         ).fetchall()
         return {row["severity"]: row["count"] for row in rows}
+
+    def log_agent_output(
+        self, agent_name: str, raw_output: str, error: Optional[str] = None
+    ) -> None:
+        """Log agent output for debugging parse failures.
+
+        Args:
+            agent_name: Name of agent (e.g., "failure_agent")
+            raw_output: Raw LLM output string
+            error: Optional error message (e.g., "JSON extraction failed")
+        """
+        timestamp = datetime.utcnow().isoformat()
+        try:
+            with self.conn:
+                self.conn.execute(
+                    """
+                INSERT INTO agent_outputs (timestamp, agent_name, raw_output, error)
+                VALUES (?, ?, ?, ?)
+                """,
+                    (timestamp, agent_name, raw_output, error),
+                )
+            logger.debug(f"Logged {agent_name} output to agent_outputs table")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to log agent output: {e}")
 
     def close(self) -> None:
         self.conn.close()

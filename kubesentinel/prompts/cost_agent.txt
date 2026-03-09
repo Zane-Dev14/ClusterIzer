@@ -24,9 +24,8 @@ Output format:
   {
     "resource": "namespace/resource_type/name",
     "severity": "critical|high|medium|low",
-    "analysis": "Why this is costing money",
-    "first_fix": "Exact kubectl command to reduce cost",
-    "expected_savings": "Estimated impact or monthly savings"
+    "analysis": "Why this is costing money and estimated savings",
+    "recommendation": "Exact kubectl command to reduce cost (NO placeholders)"
   }
 ]
 

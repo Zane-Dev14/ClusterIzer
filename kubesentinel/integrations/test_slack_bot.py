@@ -1,7 +1,7 @@
 """Tests for Slack Socket Mode chat integration."""
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from kubesentinel.integrations.slack_bot import (
     safe_kubectl_command,
     extract_finding_details,
@@ -60,9 +60,7 @@ class TestKubectlCommand:
     def test_command_error(self):
         """Test that command errors are reported."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(
-                returncode=1, stderr="Error: pods not found\n"
-            )
+            mock_run.return_value = Mock(returncode=1, stderr="Error: pods not found\n")
 
             result = safe_kubectl_command("get pods")
 
@@ -210,9 +208,7 @@ class TestTextFormatting:
         assert any(b.get("type") == "actions" for b in blocks)
 
         # Buttons should be present
-        action_block = next(
-            (b for b in blocks if b.get("type") == "actions"), None
-        )
+        action_block = next((b for b in blocks if b.get("type") == "actions"), None)
         assert action_block is not None
         assert len(action_block.get("elements", [])) > 0
 
@@ -249,8 +245,7 @@ class TestKubectlExtraction:
     def test_extract_rollout_restart_command(self):
         """Test extracting rollout restart command."""
         recommendation = (
-            "Fix: kubectl rollout restart deployment "
-            "media-frontend -n social-network"
+            "Fix: kubectl rollout restart deployment media-frontend -n social-network"
         )
         commands = extract_kubectl_commands(recommendation)
         assert len(commands) > 0
@@ -280,7 +275,7 @@ class TestKubectlExtraction:
 
     def test_extract_handles_piped_commands(self):
         """Test that extraction handles piped commands."""
-        recommendation = 'kubectl get pods -A -o jsonpath=\'{.items[*].spec.containers[*].image}\' | tr'
+        recommendation = "kubectl get pods -A -o jsonpath='{.items[*].spec.containers[*].image}' | tr"
         commands = extract_kubectl_commands(recommendation)
         # Should extract at least the base command
         assert len(commands) > 0

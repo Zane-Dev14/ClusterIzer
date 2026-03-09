@@ -25,8 +25,7 @@ Output format:
     "resource": "namespace/resource_type/name",
     "severity": "critical|high|medium|low",
     "analysis": "Why this is a security risk",
-    "first_fix": "Exact kubectl command to remediate",
-    "verification": "Command to verify the fix worked"
+    "recommendation": "Exact kubectl command to remediate (NO placeholders)"
   }
 ]
 

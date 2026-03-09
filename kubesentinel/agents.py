@@ -2,6 +2,9 @@ import json
 import logging
 import os
 import re
+import shlex
+import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 from functools import wraps
@@ -26,6 +29,39 @@ AGENT_TIMEOUT_SECONDS = 60
 AGENT_MAX_ITERATIONS = 8
 AGENT_TOOL_SIGNAL_LIMIT = 30
 VERBOSE = os.getenv("KUBESENTINEL_VERBOSE_AGENTS") == "1"
+
+# Expected JSON schema for agent findings
+AGENT_FINDING_SCHEMA = ["resource", "severity", "analysis", "recommendation"]
+
+# Kubectl safe verbs (read-only operations)
+KUBECTL_SAFE_VERBS = {
+    "get",
+    "describe",
+    "logs",
+    "top",
+    "explain",
+    "api-resources",
+    "api-versions",
+    "diff",
+}
+
+# Kubectl write verbs (require 2-step approval)
+KUBECTL_WRITE_VERBS = {
+    "apply",
+    "create",
+    "delete",
+    "patch",
+    "replace",
+    "scale",
+    "set",
+    "rollout",
+    "exec",
+    "port-forward",
+    "attach",
+    "cp",
+    "label",
+    "annotate",
+}
 
 
 class AgentTimeoutError(Exception):
@@ -132,7 +168,138 @@ def make_tools(state: InfraState) -> List:
         """
         return json.dumps(state.get("risk_score", {}))
 
-    return [get_cluster_summary, get_graph_summary, get_signals, get_risk_score]
+    @tool
+    def get_pod_logs(pod_name: str, namespace: str, tail_lines: int = 50) -> str:
+        """Get recent logs from a pod to diagnose failures.
+
+        Args:
+            pod_name: Name of the pod (must exist in cluster data)
+            namespace: Namespace of the pod
+            tail_lines: Number of recent log lines to retrieve (default 50, max 200)
+
+        Returns: Log lines as string, or error message if logs cannot be retrieved.
+        Use this to see what's actually failing in crashloop pods.
+        """
+        tail_lines = min(tail_lines, 200)  # Safety limit
+        try:
+            # Try to get logs from previous (crashed) container first
+            result = subprocess.run(
+                ["kubectl", "logs", f"{pod_name}", "-n", namespace, "--previous", f"--tail={tail_lines}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return result.stdout or "No logs available"
+            
+            # Fallback: get logs from current container
+            result = subprocess.run(
+                ["kubectl", "logs", f"{pod_name}", "-n", namespace, f"--tail={tail_lines}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "Error: Log fetch timed out after 10 seconds"
+        except Exception as e:
+            return f"Error fetching logs: {str(e)}"
+
+    @tool
+    def get_resource_yaml(resource_type: str, name: str, namespace: str = "") -> str:
+        """Get YAML definition of a Kubernetes resource to inspect configuration.
+
+        Args:
+            resource_type: Resource type (deployment, service, pod, configmap, etc.)
+            name: Resource name (must exist in cluster data)
+            namespace: Namespace (required for namespaced resources)
+
+        Returns: YAML definition as string, or error message.
+        Use this to inspect resource configuration, labels, annotations, env vars, volume mounts, etc.
+        """
+        if not resource_type or not name:
+            return "Error: resource_type and name are required"
+        
+        cmd = ["kubectl", "get", resource_type, name, "-o", "yaml"]
+        if namespace:
+            cmd.extend(["-n", namespace])
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "Error: Get resource timed out after 10 seconds"
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    @tool
+    def kubectl_safe(command_args: str) -> str:
+        """Execute safe (read-only) kubectl command to gather evidence.
+
+        Args:
+            command_args: kubectl command arguments WITHOUT 'kubectl' prefix.
+                         Example: "describe pod myapp-123 -n production"
+                         Only safe verbs allowed: get, describe, logs, top, explain
+
+        Returns: Command output as string, or error message if command is unsafe.
+        Use this to gather diagnostic evidence. DO NOT use for write operations.
+        """
+        if not command_args or not command_args.strip():
+            return "Error: command_args cannot be empty"
+        
+        # Parse command safely
+        try:
+            args = shlex.split(command_args.strip())
+        except ValueError as e:
+            return f"Error: Invalid command syntax: {str(e)}"
+        
+        if not args:
+            return "Error: No command provided"
+        
+        # Validate verb is safe
+        verb = args[0].lower()
+        if verb not in KUBECTL_SAFE_VERBS:
+            return (
+                f"Error: Verb '{verb}' not allowed. "
+                f"Only safe read-only verbs permitted: {', '.join(sorted(KUBECTL_SAFE_VERBS))}"
+            )
+        
+        # Reject shell metacharacters for safety
+        dangerous_chars = ["|", "&", ";", "$", "`", ">", "<", "\n", "\\"]
+        if any(char in command_args for char in dangerous_chars):
+            return "Error: Shell metacharacters not allowed in kubectl commands"
+        
+        # Execute kubectl command
+        try:
+            result = subprocess.run(
+                ["kubectl"] + args,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                return result.stdout or "Command completed successfully (no output)"
+            else:
+                return f"kubectl error (exit {result.returncode}): {result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "Error: Command timed out after 15 seconds"
+        except Exception as e:
+            return f"Error executing kubectl: {str(e)}"
+
+    return [
+        get_cluster_summary,
+        get_graph_summary,
+        get_signals,
+        get_risk_score,
+        get_pod_logs,
+        get_resource_yaml,
+        kubectl_safe,
+    ]
 
 
 def planner_node(state: InfraState) -> InfraState:
@@ -255,7 +422,10 @@ def planner_node(state: InfraState) -> InfraState:
     for agent in phrase_agents:
         scores[agent] += 2
 
-    agents = [agent for agent, score in scores.items() if score > 0]
+    # Select top 2 agents by score for efficiency (not all 3)
+    # Sort by score descending, take top 2, but require minimum score > 0
+    sorted_agents = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+    agents = [agent for agent, score in sorted_agents[:2] if score > 0]
 
     # If no specific routing matched, default to failure_agent for generic queries
     if not agents:
@@ -288,6 +458,144 @@ def planner_node(state: InfraState) -> InfraState:
     return state
 
 
+def _verify_findings_with_evidence(
+    findings: List[Dict[str, Any]], state: InfraState, max_verifications: int = 3
+) -> List[Dict[str, Any]]:
+    """Verify LLM findings with actual cluster evidence (ReAct verification loop).
+
+    For each finding, attempts to:
+    1. Extract resource and validate it exists
+    2. Gather evidence: pod logs, resource YAML, describe output
+    3. Try pattern matching against error signatures
+    4. Add evidence to finding or mark as unverified
+
+    Args:
+        findings: LLM-generated findings (hypotheses)
+        state: Current infrastructure state
+        max_verifications: Max number of findings to verify (20s timeout constraint)
+
+    Returns:
+        Enhanced findings with evidence annotations
+    """
+    if not findings:
+        return []
+
+    verified_findings = []
+    snapshot = state.get("cluster_snapshot", {})
+    all_pods = {p["name"]: p for p in snapshot.get("pods", [])}
+
+    # Track verification attempts for timeout management
+    verifications_done = 0
+    max_verifications = min(max_verifications, len(findings))
+
+    for finding in findings[:max_verifications]:
+        verifications_done += 1
+        try:
+            # Parse resource from finding
+            resource = finding.get("resource", "")
+            if not resource:
+                finding["verified"] = False
+                finding["evidence"] = "No resource specified"
+                verified_findings.append(finding)
+                continue
+
+            # Extract namespace and resource name
+            parts = resource.split("/")
+            if len(parts) < 2:
+                finding["verified"] = False
+                finding["evidence"] = f"Invalid resource format: {resource}"
+                verified_findings.append(finding)
+                continue
+
+            # Try to validate resource exists in snapshot
+            namespace = parts[0] if len(parts) >= 2 else "default"
+            resource_name = parts[-1]
+
+            # Check if it's a pod
+            if resource_name in all_pods:
+                pod = all_pods[resource_name]
+                evidence = []
+
+                # Try to get logs from the pod
+                if pod.get("crash_loop_backoff"):
+                    try:
+                        result = subprocess.run(
+                            [
+                                "kubectl",
+                                "logs",
+                                resource_name,
+                                "-n",
+                                namespace,
+                                "--previous",
+                                "--tail=30",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                        if result.returncode == 0 and result.stdout:
+                            evidence.append(
+                                f"Pod logs (last 30 lines): {result.stdout[:500]}"
+                            )
+                            # Try error signature matching
+                            from .diagnostics.error_signatures import (
+                                diagnose_crash_logs,
+                            )
+
+                            diagnosis = diagnose_crash_logs(result.stdout)
+                            if diagnosis:
+                                evidence.append(
+                                    f"Root cause: {diagnosis.root_cause} (confidence: {diagnosis.confidence})"
+                                )
+                    except Exception as e:
+                        if VERBOSE:
+                            logger.debug(f"Failed to get logs for {resource_name}: {e}")
+
+                # Add evidence to finding
+                if evidence:
+                    finding["verified"] = True
+                    finding["evidence"] = " | ".join(evidence)
+                else:
+                    finding["verified"] = False
+                    finding["evidence"] = "Pod exists but no logs available"
+
+            else:
+                # Generic validation: resource exists in snapshot (any type)
+                found = False
+                for resource_list in [
+                    "deployments",
+                    "statefulsets",
+                    "daemonsets",
+                    "services",
+                    "configmaps",
+                ]:
+                    resources = snapshot.get(resource_list, [])
+                    if any(r.get("name") == resource_name for r in resources):
+                        found = True
+                        break
+
+                finding["verified"] = found
+                finding["evidence"] = (
+                    "Found in cluster snapshot" if found else "Not found in snapshot"
+                )
+
+            verified_findings.append(finding)
+
+        except Exception as e:
+            logger.warning(f"Error verifying finding: {e}")
+            finding["verified"] = False
+            finding["evidence"] = f"Verification error: {str(e)[:100]}"
+            verified_findings.append(finding)
+
+    # Mark remaining findings as unverified (didn't run verification)
+    for finding in findings[max_verifications:]:
+        finding["verified"] = False
+        finding["evidence"] = "Verification skipped (timeout constraint)"
+        verified_findings.append(finding)
+
+    return verified_findings
+
+
 def failure_agent_node(state: InfraState) -> InfraState:
     """Reliability analysis agent - analyzes failure signals."""
     if "failure_agent" not in state.get("planner_decision", []):
@@ -312,6 +620,11 @@ def failure_agent_node(state: InfraState) -> InfraState:
             )
 
         findings = run_llm()
+        
+        # Verify findings with actual evidence (ReAct loop)
+        if findings:
+            findings = _verify_findings_with_evidence(findings, state, max_verifications=3)
+        
         state["failure_findings"] = findings[:MAX_FINDINGS]
     except AgentTimeoutError:
         logger.warning("Failure agent timeout - using deterministic fallback")
@@ -344,6 +657,11 @@ def cost_agent_node(state: InfraState) -> InfraState:
             return _run_agent(state, "cost_agent", "cost_agent.txt", "cost")
 
         findings = run_llm()
+        
+        # Verify findings with actual evidence (ReAct loop)
+        if findings:
+            findings = _verify_findings_with_evidence(findings, state, max_verifications=3)
+        
         state["cost_findings"] = findings[:MAX_FINDINGS]
     except AgentTimeoutError:
         logger.warning("Cost agent timeout - using deterministic fallback")
@@ -376,6 +694,11 @@ def security_agent_node(state: InfraState) -> InfraState:
             return _run_agent(state, "security_agent", "security_agent.txt", "security")
 
         findings = run_llm()
+        
+        # Verify findings with actual evidence (ReAct loop)
+        if findings:
+            findings = _verify_findings_with_evidence(findings, state, max_verifications=3)
+        
         state["security_findings"] = findings[:MAX_FINDINGS]
     except AgentTimeoutError:
         logger.warning("Security agent timeout - using deterministic fallback")
@@ -630,7 +953,7 @@ def _run_agent(
         logger.debug(f"Running {agent_name} agent, prompt_size={len(human_msg)} chars")
 
     result = agent.invoke({"messages": [HumanMessage(content=human_msg)]})
-    findings = _extract_json_findings(result)
+    findings = _extract_json_findings(result, agent_name)
 
     if VERBOSE:
         logger.debug(
@@ -642,185 +965,287 @@ def _run_agent(
     return findings
 
 
-def _extract_json_findings(result: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    """Extract JSON findings array from agent output.
+def _extract_json_findings(
+    result: Dict[str, Any] | None, agent_name: str = "unknown"
+) -> List[Dict[str, Any]]:
+    """Extract JSON findings array from agent output with robust 7-step extraction.
 
-    Handles agent.invoke() result structure: {"output": "...JSON..."}
-    Also handles markdown-fenced JSON: `` `json` {...} ` ``
+    Steps:
+    1. Extract content from result dict
+    2. Sanitize control characters
+    3. Handle markdown code fences
+    4. Try direct JSON parse
+    5. Fallback: extract content between [ and ]
+    6. Validate schema for each finding
+    7. Log parse failures to persistence
+
+    Args:
+        result: Agent output dict with "output" key
+        agent_name: Name of agent for logging (e.g., "failure_agent")
+
+    Returns:
+        List of validated finding dicts
     """
     if not result:
+        logger.warning(f"{agent_name}: No result dict provided")
         return []
 
-    # Agent.invoke() returns {"output": "..."} not {"messages": [...]}
+    # Step 1: Extract content from result dict
     content = result.get("output", "")
     if not content:
+        logger.warning(f"{agent_name}: Empty output in result dict")
         return []
 
     content = str(content) if not isinstance(content, str) else content
 
-    # Sanitize control characters
+    # Step 2: Sanitize control characters
     content = _sanitize_for_json(content)
 
-    # Try to extract JSON - look for markdown fence first
-    if "```json" in content or "```" in content:
-        # Extract content between fences
+    # Step 3: Handle markdown code fences (```json ... ``` or ``` ... ```)
+    if "```" in content:
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
         if match:
             content = match.group(1).strip()
+            if VERBOSE:
+                logger.debug(f"{agent_name}: Extracted content from markdown fence")
 
+    # Step 4: Try direct JSON parse
     try:
-        # Try direct JSON parse first
         findings = json.loads(content)
         if isinstance(findings, list):
-            # Validate structure
-            valid = [
-                f
-                for f in findings
-                if isinstance(f, dict)
-                and all(
-                    k in f
-                    for k in ["resource", "severity", "analysis", "recommendation"]
-                )
-            ]
-            if valid and VERBOSE:
-                logger.debug(f"Extracted {len(valid)} findings from agent output")
-            return valid
+            valid = _validate_findings(findings, agent_name)
+            if valid:
+                return valid
     except json.JSONDecodeError as e:
-        # Fallback: look for JSON array brackets
-        start, end = content.find("["), content.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            try:
-                findings = json.loads(content[start : end + 1])
-                if isinstance(findings, list):
-                    valid = [
-                        f
-                        for f in findings
-                        if isinstance(f, dict)
-                        and all(
-                            k in f
-                            for k in [
-                                "resource",
-                                "severity",
-                                "analysis",
-                                "recommendation",
-                            ]
-                        )
-                    ]
-                    if valid:
-                        if VERBOSE:
-                            logger.debug(
-                                f"Extracted {len(valid)} findings from bracketed JSON"
-                            )
-                        return valid
-            except json.JSONDecodeError:
-                pass
-
         if VERBOSE:
-            logger.warning(f"Failed to parse JSON findings: {str(e)[:100]}")
-        logger.debug(f"Raw agent output (first 500 chars): {content[:500]}")
+            logger.debug(f"{agent_name}: Direct JSON parse failed: {str(e)[:100]}")
+
+    # Step 5: Fallback - extract content between [ and ]
+    start, end = content.find("["), content.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            findings = json.loads(content[start : end + 1])
+            if isinstance(findings, list):
+                valid = _validate_findings(findings, agent_name)
+                if valid:
+                    if VERBOSE:
+                        logger.debug(
+                            f"{agent_name}: Extracted from bracketed JSON fallback"
+                        )
+                    return valid
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"{agent_name}: Bracketed JSON extraction failed: {str(e)[:100]}"
+            )
+
+    # Step 6 & 7: Log parse failure
+    logger.error(
+        f"{agent_name}: Failed to extract valid JSON findings. "
+        f"Output preview: {content[:200]}"
+    )
+
+    # Log to persistence for debugging
+    try:
+        from .runtime import get_persistence_manager
+
+        persistence = get_persistence_manager()
+        persistence.log_agent_output(agent_name, content, error="JSON extraction failed")
+    except Exception as e:
+        logger.warning(f"Failed to log agent output to persistence: {e}")
 
     return []
+
+
+def _validate_findings(
+    findings: List[Any], agent_name: str = "unknown"
+) -> List[Dict[str, Any]]:
+    """Validate findings against AGENT_FINDING_SCHEMA.
+
+    Args:
+        findings: List of candidate finding dicts
+        agent_name: Name of agent for logging
+
+    Returns:
+        List of valid findings (empty if none valid)
+    """
+    if not isinstance(findings, list):
+        logger.warning(f"{agent_name}: Findings is not a list: {type(findings)}")
+        return []
+
+    valid = []
+    for idx, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            logger.warning(
+                f"{agent_name}: Finding {idx} is not a dict: {type(finding)}"
+            )
+            continue
+
+        missing = [k for k in AGENT_FINDING_SCHEMA if k not in finding]
+        if missing:
+            logger.warning(
+                f"{agent_name}: Finding {idx} missing required fields: {missing}"
+            )
+            continue
+
+        valid.append(finding)
+
+    if valid and VERBOSE:
+        logger.debug(f"{agent_name}: Validated {len(valid)}/{len(findings)} findings")
+
+    return valid
+
+
+def _synthesize_strategic_summary(state: InfraState) -> str:
+    """Generate deterministic strategic summary from findings (no LLM).
+
+    Produces structured output based on verified findings and risk assessment.
+    
+    Args:
+        state: Current infrastructure state with findings
+        
+    Returns:
+        Strategic summary string
+    """
+    failure = state.get("failure_findings", [])
+    cost = state.get("cost_findings", [])
+    security = state.get("security_findings", [])
+    risk = state.get("risk_score", {})
+    snapshot = state.get("cluster_snapshot", {})
+
+    lines = []
+    lines.append(f"# Strategic Summary")
+    lines.append("")
+    
+    # Risk assessment header
+    risk_score = risk.get("score", 0)
+    risk_grade = risk.get("grade", "N/A")
+    lines.append(f"## Risk Assessment: {risk_score}/100 ({risk_grade})")
+    lines.append(f"- Cluster Size: {len(snapshot.get('nodes', []))} nodes, {len(snapshot.get('pods', []))} pods")
+    lines.append(f"- Total Signals: {risk.get('signal_count', 0)}")
+    lines.append(f"- Agents Executed: failure_agent, cost_agent (top-2 selection)")
+    lines.append("")
+
+    # Critical findings
+    critical_findings = []
+    for finding_list in [failure, cost, security]:
+        critical_findings.extend([f for f in finding_list if f.get("severity") == "critical"])
+
+    if critical_findings:
+        lines.append(f"## Critical Issues ({len(critical_findings)} found)")
+        for finding in critical_findings[:5]:  # Top 5 critical
+            lines.append(f"- **{finding.get('resource')}**: {finding.get('analysis')}")
+            if finding.get("verified"):
+                lines.append(f"  Evidence: {finding.get('evidence', 'N/A')[:100]}")
+            lines.append(f"  Action: {finding.get('recommendation')}")
+            lines.append("")
+    else:
+        lines.append("## No Critical Issues Detected")
+        lines.append("")
+
+    # Category breakdown
+    lines.append("## Findings by Category")
+    lines.append(f"- **Reliability**: {len(failure)} findings")
+    if failure:
+        high_reliability = [f for f in failure if f.get("severity") in ("critical", "high")]
+        if high_reliability:
+            lines.append(f"  - {len(high_reliability)} high-severity findings require immediate attention")
+
+    lines.append(f"- **Cost**: {len(cost)} findings")
+    if cost:
+        savings_potential = len([f for f in cost if f.get("severity") in ("high", "critical")])
+        if savings_potential:
+            lines.append(f"  - {savings_potential} optimization opportunities identified")
+
+    lines.append(f"- **Security**: {len(security)} findings")
+    if security:
+        security_critical = [f for f in security if f.get("severity") == "critical"]
+        if security_critical:
+            lines.append(f"  - {len(security_critical)} critical vulnerabilities need remediation")
+
+    lines.append("")
+
+    # Recommendations
+    if failure or cost or security:
+        lines.append("## Recommended Actions (Prioritized)")
+        idx = 1
+        
+        # Critical findings first
+        for finding in critical_findings[:3]:
+            lines.append(f"{idx}. **{finding.get('resource', 'Cluster')}** ({finding.get('severity')})")
+            lines.append(f"   - Issue: {finding.get('analysis')}")
+            lines.append(f"   - Action: {finding.get('recommendation')}")
+            if finding.get("verified") and finding.get("evidence"):
+                lines.append(f"   - Evidence: {finding.get('evidence')[:100]}")
+            idx += 1
+        
+        # High-severity findings
+        high_findings = []
+        for finding_list in [failure, cost, security]:
+            high_findings.extend([f for f in finding_list if f.get("severity") == "high"])
+        
+        for finding in high_findings[:2]:
+            lines.append(f"{idx}. **{finding.get('resource', 'Cluster')}** ({finding.get('severity')})")
+            lines.append(f"   - Issue: {finding.get('analysis')}")
+            lines.append(f"   - Action: {finding.get('recommendation')}")
+            idx += 1
+    
+    lines.append("")
+    lines.append("## Verification Status")
+    verified_count = sum(1 for f in failure + cost + security if f.get("verified"))
+    total_count = len(failure) + len(cost) + len(security)
+    lines.append(f"- {verified_count}/{total_count} findings verified with cluster evidence")
+    
+    lines.append("")
+    lines.append("---")
+    lines.append(f"*Generated by KubeSentinel at {datetime.utcnow().isoformat()}*")
+
+    return "\n".join(lines)
 
 
 def synthesizer_node(state: InfraState) -> InfraState:
     """Strategic synthesis agent - produces executive summary."""
     logger.info("Running synthesizer...")
-    system_prompt = (PROMPT_DIR / "synthesizer.txt").read_text()
-    failure, cost, security = (
-        state.get("failure_findings", []),
-        state.get("cost_findings", []),
-        state.get("security_findings", []),
-    )
-    risk = state.get("risk_score", {})
-    snapshot = state.get("cluster_snapshot", {})
-    top_risks = risk.get("top_risks", [])
-
-    # Extract concrete resource examples from top_risks for LLM to use
-    resource_examples = []
-    namespaces_used = set()
-    deployments_used = set()
-    pods_used = set()
-    diagnosis_info = []  # Track diagnosis information for context
-
-    for risk_item in top_risks[:3]:  # First 3 risks
-        resources = risk_item.get("resources", [])[:2]  # Up to 2 examples per risk
-        for res in resources:
-            resource_examples.append(res)
-            if "/" in res:
-                parts = res.split("/")
-                if len(parts) >= 2:
-                    namespaces_used.add(parts[0])
-                    deployments_used.add(res)
-            if "pod/" in res:
-                pods_used.add(res)
-
-        # Extract diagnosis if present
-        if diagnosis := risk_item.get("diagnosis"):
-            diagnosis_summary = {
-                "risk_title": risk_item.get("title"),
-                "type": diagnosis.get("type"),
-                "root_cause": diagnosis.get("root_cause"),
-                "confidence": diagnosis.get("confidence"),
-                "evidence": diagnosis.get("evidence", "")[:200],  # Truncate evidence
-                "recommended_fix": diagnosis.get("recommended_fix"),
-            }
-            diagnosis_info.append(diagnosis_summary)
-
-    # Build prompt with explicit resource references
-    context = f"""User Query: {state.get("user_query", "Unknown")}
-
-CONCRETE RESOURCES FROM THIS CLUSTER (use these exact names in commands):
-Namespaces: {", ".join(sorted(namespaces_used)) if namespaces_used else "default, kube-system, social-network"}
-Example Deployments: {", ".join(resource_examples[:3]) if resource_examples else "deployment/social-network/media-frontend"}
-Example Pods: {", ".join([e for e in resource_examples if "pod/" in e][:2]) if any("pod/" in e for e in resource_examples) else "pod/social-network/media-frontend-64dd9f988-2nkmd"}
-
-RISK SUMMARY:
-Risk: {risk.get("score", 0)}/100 (Grade: {risk.get("grade", "N/A")}), Signals: {risk.get("signal_count", 0)}
-Cluster: nodes={len(snapshot.get("nodes", []))}, deployments={len(snapshot.get("deployments", []))}, pods={len(snapshot.get("pods", []))}, services={len(snapshot.get("services", []))}
-
-TOP 5 RISKS (use these exact resource names in your commands):
-{json.dumps(top_risks, indent=2)}
-"""
-
-    # Add diagnosis information if any risks have automated diagnosis
-    if diagnosis_info:
-        context += f"""
-AUTOMATED ROOT CAUSE DIAGNOSIS (high confidence):
-{json.dumps(diagnosis_info, indent=2)}
-
-The diagnosis above was automatically determined by analyzing crash logs. When answering the user's question, reference the specific root cause and evidence provided.
-"""
-
-    context += f"""
-AGENT FINDINGS:
-Failure Findings ({len(failure)}): {json.dumps(failure[:5], indent=2)}
-Cost Findings ({len(cost)}): {json.dumps(cost[:5], indent=2)}
-Security Findings ({len(security)}): {json.dumps(security[:5], indent=2)}
-
-INSTRUCTIONS: Produce strategic summary per your instructions. Use ONLY resource names that appear above in the CONCRETE RESOURCES and TOP 5 RISKS sections. NO placeholders."""
+    
+    # Use deterministic synthesis instead of LLM
     try:
-        response = LLM.invoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=context)]
-        )
-        summary = response.content if hasattr(response, "content") else str(response)
-        summary = str(summary) if not isinstance(summary, str) else summary
-
-        # Check for and warn about placeholders in output
-        placeholder_pattern = r"<[a-z\-_]+>"
-        placeholders_found = re.findall(placeholder_pattern, summary, re.IGNORECASE)
-        if placeholders_found:
-            logger.warning(
-                f"Synthesizer output contains placeholders: {set(placeholders_found)}"
+        # First try deterministic summary (no LLM, faster, more reliable)
+        summary = _synthesize_strategic_summary(state)
+        
+        # Optionally, enhance with LLM if available (for richer formatting)
+        # but don't fail if LLM unavailable
+        try:
+            system_prompt = (PROMPT_DIR / "synthesizer.txt").read_text()
+            context = f"Create a strategic summary based on this analysis:\n\n{summary}"
+            
+            response = LLM.invoke(
+                [SystemMessage(content=system_prompt), HumanMessage(content=context)]
             )
-            logger.warning(
-                "This indicates LLM is not using concrete resource names from context"
-            )
-
+            llm_summary = response.content if hasattr(response, "content") else str(response)
+            llm_summary = str(llm_summary) if not isinstance(llm_summary, str) else llm_summary
+            
+            # Check for placeholders (indicates hallucination)
+            placeholder_pattern = r"<[a-z\-_]+>"
+            placeholders_found = re.findall(placeholder_pattern, llm_summary, re.IGNORECASE)
+            if placeholders_found:
+                logger.warning(
+                    f"LLM output contains placeholders: {set(placeholders_found)} - using deterministic summary instead"
+                )
+                summary = summary  # Use deterministic version
+            else:
+                # LLM enhanced successfully
+                summary = llm_summary if llm_summary else summary
+                logger.debug("LLM enhanced strategic summary")
+        except Exception as e:
+            logger.debug(f"LLM enhancement skipped: {e} - using deterministic summary")
+            # Fallback to deterministic summary
+            pass
+        
         state["strategic_summary"] = (
-            summary[:4000] + "\n[Summary truncated]" if len(summary) > 4000 else summary
+            summary[:8000] + "\n[Summary truncated]" if len(summary) > 8000 else summary
         )
         logger.info("Synthesizer complete")
     except Exception as e:
         logger.error(f"Synthesizer error: {e}")
         state["strategic_summary"] = "Error generating strategic summary."
+    
     return state

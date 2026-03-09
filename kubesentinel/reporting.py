@@ -23,7 +23,14 @@ def build_report(state: InfraState) -> str:
     sections.append(_build_architecture_section(state))
     sections.append(
         _build_findings_section(
-            "💰 Cost Optimization Report",
+            "� Reliability Issues",
+            state.get("failure_findings", []),
+            "reliability issues",
+        )
+    )
+    sections.append(
+        _build_findings_section(
+            "�💰 Cost Optimization Report",
             state.get("cost_findings", []),
             "cost optimization issues",
         )
@@ -99,7 +106,7 @@ def _build_architecture_section(state: InfraState) -> str:
 def _build_findings_section(
     title: str, findings: List[Dict[str, Any]], issue_type: str
 ) -> str:
-    """Build findings section (cost/security/failure)."""
+    """Build findings section (cost/security/failure) with evidence."""
     lines = [f"## {title}\n"]
 
     if not findings:
@@ -117,7 +124,15 @@ def _build_findings_section(
                 for finding in items[:5]:
                     lines.append(f"**{finding['resource']}**")
                     lines.append(f"- **Analysis:** {finding['analysis']}")
-                    lines.append(f"- **Recommendation:** {finding['recommendation']}\n")
+                    lines.append(f"- **Recommendation:** {finding['recommendation']}")
+                    
+                    # Show verification status and evidence if available
+                    if finding.get("verified"):
+                        lines.append(f"- ✅ **Verified:** {finding.get('evidence', 'Evidence gathered')[:200]}")
+                    elif "evidence" in finding:
+                        lines.append(f"- ℹ️ **Status:** {finding['evidence']}")
+                    
+                    lines.append("")
 
                 if len(items) > 5:
                     lines.append(
