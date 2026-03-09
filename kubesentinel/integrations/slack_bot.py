@@ -1039,7 +1039,6 @@ def handle_skip_execute(ack: Any, body: dict, say: Any) -> None:
     """Handle 'Skip' button click."""
     ack()
 
-    user_id = body["user"]["id"]
     message_ts = body["message"]["ts"]
     thread_ts = body["message"].get("thread_ts", message_ts)
 

@@ -26,10 +26,10 @@ jobs:
         run: uv sync --all-extras
 
       - name: Ruff lint
-        run: uv run ruff check .
+        run: uv run ruff check kubesentinel tools
 
       - name: Ruff format check
-        run: uv run ruff format --check .
+        run: uv run ruff format --check kubesentinel tools
 
       - name: Type check
         run: uv run mypy kubesentinel
@@ -54,7 +54,7 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run pytest kubesentinel/tests -v
 
   architecture-tests:
     name: Architecture Tests

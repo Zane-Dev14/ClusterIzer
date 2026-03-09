@@ -2,105 +2,104 @@
 
 **Kubernetes Intelligence Engine**
 
-A hierarchical, persistent, graph-based multi-agent runtime for Kubernetes infrastructure analysis using LangChain, LangGraph, and Ollama.
+A deterministic-first, multi-agent analysis system for Kubernetes infrastructure assessment using LangChain, LangGraph, and Ollama.
 
 ---
 
-## Overview
+## What is KubeSentinel?
 
-KubeSentinel is a **deterministic-first AI system** that:
+KubeSentinel analyzes Kubernetes clusters to identify reliability, security, and cost issues. It combines:
 
-1. Connects to any Kubernetes cluster (via kubeconfig or in-cluster)
-2. Extracts bounded static state (nodes, deployments, pods, services)
-3. Builds a dependency graph and generates deterministic signals
-4. Computes risk scores using severity-weighted signal aggregation
-5. Delegates analysis to specialized ReAct agents (failure, cost, security)
-6. Produces comprehensive markdown reports with strategic AI insights
+- **Deterministic rules** (200+ built-in signals)
+- **AI agents** (cost, security, reliability analyzers)
+- **Query-aware routing** (understands what you're asking)
+- **Safe remediation** (kubectl approval gates, audit logs)
+- **Slack integration** (real-time cluster monitoring)
 
-This is **not a chatbot**. It's a graph-executed reasoning system.
-
----
-
-## Architecture
-
-```
-┌──────────────────────┐
-│ CLI (scan command)   │
-└─────────────┬────────┘
-              ↓
-┌─────────────────────────────┐
-│ Deterministic Layer         │
-│                             │
-│ 1. Cluster Snapshot Node    │
-│ 2. Graph Builder Node       │
-│ 3. Signal Engine Node       │
-│ 4. Risk Model Node          │
-└─────────────┬───────────────┘
-              ↓
-┌─────────────────────────────┐
-│ DeepAgent Graph             │
-│                             │
-│ Planner Node                │
-│   ├─ FailureAgent Node      │
-│   ├─ CostAgent Node         │
-│   ├─ SecurityAgent Node     │
-│   └─ StrategicSynthesizer   │
-└─────────────┬───────────────┘
-              ↓
-┌─────────────────────────────┐
-│ Report Builder              │
-└─────────────────────────────┘
-```
+This is **not a chatbot**. It's a graph-based reasoning system that produces actionable intelligence.
 
 ---
 
-## Prerequisites
+## Quick Start
+
+### Prerequisites
 
 - **Python 3.11+**
-- **uv** package manager ([install uv](https://github.com/astral-sh/uv))
-- **Ollama** with `llama3.1:8b-instruct-q8_0` model
-- Access to a Kubernetes cluster (kubeconfig or in-cluster)
+- **uv** package manager ([install](https://github.com/astral-sh/uv))
+- **Ollama** with `llama3.1:8b-instruct-q8_0` ([install](https://ollama.ai))
+- Kubernetes cluster with kubeconfig or in-cluster auth
 
----
-
-## Installation
+### Installation
 
 ```bash
-# Install dependencies
 make install
-
-# Or using uv directly
-uv sync
+# or: uv sync
 ```
+
+### Run a Scan
+
+```bash
+# Full cluster analysis
+uv run kubesentinel scan
+
+# Focus on cost
+uv run kubesentinel scan --query "reduce costs"
+
+# Focus on security
+uv run kubesentinel scan --query "security audit"
+
+# CI mode (exit 0 for A/B/C, exit 1 for D/F)
+uv run kubesentinel scan --ci
+```
+
+**Output**:
+- `report.md` - Full analysis with findings and recommendations
+- Risk grade: A (healthy) through F (critical)
 
 ---
 
-## Usage
+## Documentation
 
-### Basic Scan
+Comprehensive documentation is organized into 5 files:
 
-```bash
-# Run full cluster analysis
-make run
+| Document | Purpose |
+|----------|---------|
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | System design, pipeline, modules, design principles |
+| **[IMPLEMENTATION.md](IMPLEMENTATION.md)** | Implementation details, algorithms, code structure |
+| **[OPERATIONS_AND_USAGE.md](OPERATIONS_AND_USAGE.md)** | Installation, configuration, Slack setup, troubleshooting |
+| **[REPORTS_AND_RESULTS.md](REPORTS_AND_RESULTS.md)** | Test results, performance metrics, safety validation |
+| **[README.md](README.md)** | Quick start, overview, key features |
 
-# Or using uv directly
-uv run kubesentinel scan
-```
+---
 
-### Custom Query
+## Key Features
 
-```bash
-# Focus on specific analysis
-uv run kubesentinel scan --query "security audit"
-uv run kubesentinel scan --query "cost optimization"
-uv run kubesentinel scan --query "reliability analysis"
-```
+### Deterministic-First Analysis
+- 200+ built-in signals for reliability, security, cost, and architecture
+- Rules-based checks run first, LLM provides deeper insights when needed
+- No hallucinations in numeric contexts (costs, replicas, etc.)
 
-### Verbose Mode
+### Query-Aware Agent Routing
+- Understand what you're asking ("reduce costs" vs "security audit")
+- Route to appropriate analysis agents automatically
+- Default fallback behavior for generic queries
 
-```bash
-uv run kubesentinel scan --verbose
-```
+### Safe Remediation
+- Approval gates for dangerous kubectl commands
+- Audit trail for all executions
+- Clear distinction between diagnostics and remediation
+
+### Slack Integration
+- Interactive analysis directly in Slack
+- Cache-aware follow-up questions (instant responses)
+- Safe kubectl command execution with approval dialogs
+- Rich formatting with risk scores and actionable findings
+
+### Comprehensive Testing
+- 73+ test scenarios covering all features
+- 100% test pass rate
+- Type-safe (mypy validation clean)
+- Production-grade error handling
 
 ---
 
