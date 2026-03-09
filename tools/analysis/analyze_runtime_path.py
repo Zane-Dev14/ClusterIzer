@@ -92,7 +92,7 @@ def get_file_size(path: Path) -> int:
     try:
         with open(path) as f:
             return len(f.readlines())
-    except:
+    except Exception:
         return 0
 
 

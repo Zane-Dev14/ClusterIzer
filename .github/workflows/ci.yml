@@ -54,7 +54,7 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run tests
-        run: uv run pytest kubesentinel/tests -v
+        run: uv run pytest test_kubesentinel.py -v
 
   architecture-tests:
     name: Architecture Tests
@@ -73,7 +73,7 @@ jobs:
 
       - name: Run architecture validation
         run: |
-          uv run pytest kubesentinel/tests/test_architecture.py
+          uv run pytest test_kubesentinel.py::TestIntegration -v
 
   package-build:
     name: Build Package
